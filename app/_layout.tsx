@@ -1,24 +1,38 @@
-import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
 import { Stack } from 'expo-router';
-import { StatusBar } from 'expo-status-bar';
+import { useEffect, useState } from 'react';
+import { AuthProvider } from '@/context/AuthContext';
+import { LocationProvider, useLocation } from '@/context/LocationContext';
+import LocationLoadingScreen from '@/components/LocationLoadingScreen';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import 'react-native-reanimated';
 
-import { useColorScheme } from '@/hooks/use-color-scheme';
+function RootLayoutContent() {
+  const { isLoadingLocation } = useLocation();
+  const [showApp, setShowApp] = useState(false);
 
-export const unstable_settings = {
-  anchor: '(tabs)',
-};
-
-export default function RootLayout() {
-  const colorScheme = useColorScheme();
+  // Show loading screen while location is being captured
+  if (isLoadingLocation && !showApp) {
+    return <LocationLoadingScreen onLocationReady={() => setShowApp(true)} />;
+  }
 
   return (
-    <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-      <Stack>
-        <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-        <Stack.Screen name="modal" options={{ presentation: 'modal', title: 'Modal' }} />
-      </Stack>
-      <StatusBar style="auto" />
-    </ThemeProvider>
+    <Stack screenOptions={{ headerShown: false }}>
+      <Stack.Screen name="(auth)" />
+      <Stack.Screen name="(tabs)" />
+      <Stack.Screen name="equipment/[id]" />
+      <Stack.Screen name="booking-flow" />
+    </Stack>
+  );
+}
+
+export default function RootLayout() {
+  return (
+    <GestureHandlerRootView style={{ flex: 1 }}>
+      <AuthProvider>
+        <LocationProvider>
+          <RootLayoutContent />
+        </LocationProvider>
+      </AuthProvider>
+    </GestureHandlerRootView>
   );
 }
