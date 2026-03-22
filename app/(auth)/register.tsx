@@ -1,13 +1,13 @@
 import { useAuth } from '@/context/AuthContext';
 import { Ionicons } from '@expo/vector-icons';
+import { LinearGradient } from 'expo-linear-gradient';
 import { Link } from 'expo-router';
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Animated,
   Dimensions,
   Easing,
-  Image,
   KeyboardAvoidingView,
   Platform,
   ScrollView,
@@ -18,8 +18,9 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 
-const { width: SCREEN_WIDTH } = Dimensions.get('window');
+const { width: W } = Dimensions.get('window');
 
 type FormData = {
   firstName: string;
@@ -31,216 +32,156 @@ type FormData = {
   dateOfBirth: string;
 };
 
+type Errors = Partial<Record<keyof FormData, string>>;
+
+// ─── Step definitions ─────────────────────────────────────────────────────────
+const STEPS = [
+  {
+    heading: "What's your\nname?",
+    fields: ['firstName', 'lastName'] as (keyof FormData)[],
+  },
+  {
+    heading: "How can we\nreach you?",
+    fields: ['email', 'phone'] as (keyof FormData)[],
+  },
+  {
+    heading: "Create a\npassword",
+    fields: ['password', 'confirmPassword'] as (keyof FormData)[],
+  },
+  {
+    heading: "Almost\ndone!",
+    fields: ['dateOfBirth'] as (keyof FormData)[],
+  },
+];
+
+const FIELD_CONFIG: Record<keyof FormData, {
+  label: string;
+  icon: string;
+  placeholder: string;
+  keyboard?: 'default' | 'email-address' | 'phone-pad' | 'numbers-and-punctuation';
+  secure?: boolean;
+  autoCapitalize?: 'none' | 'words';
+  optional?: boolean;
+}> = {
+  firstName:       { label: 'First Name',              icon: 'person-outline',   placeholder: 'First name',           autoCapitalize: 'words' },
+  lastName:        { label: 'Last Name',               icon: 'person-outline',   placeholder: 'Last name',            autoCapitalize: 'words' },
+  email:           { label: 'E-mail',                  icon: 'mail-outline',     placeholder: 'hello@basswala.in',    keyboard: 'email-address', autoCapitalize: 'none' },
+  phone:           { label: 'Phone',                   icon: 'call-outline',     placeholder: '+91 98765 43210',      keyboard: 'phone-pad' },
+  password:        { label: 'Password',                icon: 'lock-closed-outline', placeholder: '············',      secure: true },
+  confirmPassword: { label: 'Confirm Password',        icon: 'lock-closed-outline', placeholder: '············',      secure: true },
+  dateOfBirth:     { label: 'Date of Birth (optional)',icon: 'calendar-outline', placeholder: 'YYYY-MM-DD',           keyboard: 'numbers-and-punctuation', optional: true },
+};
+
+function validate(step: number, formData: FormData): Errors {
+  const errors: Errors = {};
+  if (step === 0) {
+    if (!formData.firstName.trim()) errors.firstName = 'First name is required';
+    if (!formData.lastName.trim())  errors.lastName  = 'Last name is required';
+  } else if (step === 1) {
+    if (!formData.email.trim())             errors.email = 'Email is required';
+    else if (!/\S+@\S+\.\S+/.test(formData.email)) errors.email = 'Enter a valid email';
+    if (!formData.phone.trim())             errors.phone = 'Phone is required';
+    else if (formData.phone.replace(/\D/g, '').length < 9) errors.phone = 'Phone seems too short';
+  } else if (step === 2) {
+    if (!formData.password)                          errors.password = 'Password is required';
+    else if (formData.password.length < 6)           errors.password = 'Min 6 characters';
+    if (formData.password !== formData.confirmPassword) errors.confirmPassword = 'Passwords do not match';
+  }
+  return errors;
+}
+
+// ─── Main component ───────────────────────────────────────────────────────────
 export default function RegisterScreen() {
   const { register } = useAuth();
+  const scrollRef    = useRef<ScrollView>(null);
+  const slideAnim    = useRef(new Animated.Value(0)).current;
+  const fadeAnim     = useRef(new Animated.Value(1)).current;
 
-  // Form data
+  const [step, setStep]         = useState(0);
   const [formData, setFormData] = useState<FormData>({
-    firstName: '',
-    lastName: '',
-    email: '',
-    phone: '',
-    password: '',
-    confirmPassword: '',
-    dateOfBirth: '',
+    firstName: '', lastName: '', email: '', phone: '',
+    password: '', confirmPassword: '', dateOfBirth: '',
   });
-
-  const [currentStep, setCurrentStep] = useState(0);
-  const [loading, setLoading] = useState(false);
+  const [errors, setErrors]           = useState<Errors>({});
+  const [loading, setLoading]         = useState(false);
   const [generalError, setGeneralError] = useState('');
 
-  // Animation
-  const slideAnim = useRef(new Animated.Value(0)).current;
-
-  // ScrollView ref to control scrolling
-  const scrollRef = useRef<ScrollView>(null);
-
-  // Steps definition
-  const steps = [
-    {
-      title: "What's your name?",
-      validate: () => {
-        if (!formData.firstName.trim()) return 'First name is required';
-        if (!formData.lastName.trim()) return 'Last name is required';
-        return '';
-      },
-      render: () => (
-        <>
-          <InputGroup
-            label="First Name"
-            icon="person-outline"
-            value={formData.firstName}
-            onChange={(text: string) => setFormData({ ...formData, firstName: text })}
-            placeholder="First name"
-            autoComplete="given-name"
-          />
-          <InputGroup
-            label="Last Name"
-            icon="person-outline"
-            value={formData.lastName}
-            onChange={(text: string) => setFormData({ ...formData, lastName: text })}
-            placeholder="Last name"
-            autoComplete="family-name"
-          />
-        </>
-      ),
-    },
-    {
-      title: "How can we reach you?",
-      validate: () => {
-        if (!formData.email.trim()) return 'Email is required';
-        if (!/\S+@\S+\.\S+/.test(formData.email)) return 'Invalid email format';
-        if (!formData.phone.trim()) return 'Phone number is required';
-        if (formData.phone.replace(/\D/g, '').length < 9) return 'Phone number seems too short';
-        return '';
-      },
-      render: () => (
-        <>
-          <InputGroup
-            label="Email"
-            icon="mail-outline"
-            value={formData.email}
-            onChange={(text: string) => setFormData({ ...formData, email: text })}
-            placeholder="your.email@example.com"
-            keyboardType="email-address"
-            autoCapitalize="none"
-          />
-          <InputGroup
-            label="Phone Number"
-            icon="call-outline"
-            value={formData.phone}
-            onChange={(text: string) => setFormData({ ...formData, phone: text })}
-            placeholder="+91 98765 43210"
-            keyboardType="phone-pad"
-          />
-        </>
-      ),
-    },
-    {
-      title: "Create a secure password",
-      validate: () => {
-        if (!formData.password) return 'Password is required';
-        if (formData.password.length < 6) return 'Password must be at least 6 characters';
-        if (formData.password !== formData.confirmPassword) return 'Passwords do not match';
-        return '';
-      },
-      render: () => (
-        <>
-          <PasswordGroup
-            label="Password"
-            value={formData.password}
-            onChange={(text: string) => setFormData({ ...formData, password: text })}
-          />
-          <PasswordGroup
-            label="Confirm Password"
-            value={formData.confirmPassword}
-            onChange={(text: string) => setFormData({ ...formData, confirmPassword: text })}
-          />
-        </>
-      ),
-    },
-    {
-      title: "Almost done!",
-      validate: () => '', // optional field
-      render: () => (
-        <InputGroup
-          label="Date of Birth (optional)"
-          icon="calendar-outline"
-          value={formData.dateOfBirth}
-          onChange={(text: string) => setFormData({ ...formData, dateOfBirth: text })}
-          placeholder="YYYY-MM-DD"
-          keyboardType="numbers-and-punctuation"
-        />
-      ),
-    },
-  ];
-
-  // Scroll to top after step change
   useEffect(() => {
     scrollRef.current?.scrollTo({ y: 0, animated: true });
-  }, [currentStep]);
+  }, [step]);
+
+  const animateStep = (direction: 1 | -1, callback: () => void) => {
+    Animated.parallel([
+      Animated.timing(slideAnim, { toValue: -W * direction, duration: 260, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
+      Animated.timing(fadeAnim,  { toValue: 0, duration: 200, useNativeDriver: true }),
+    ]).start(() => {
+      callback();
+      slideAnim.setValue(W * direction);
+      fadeAnim.setValue(0);
+      Animated.parallel([
+        Animated.timing(slideAnim, { toValue: 0, duration: 280, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
+        Animated.timing(fadeAnim,  { toValue: 1, duration: 260, useNativeDriver: true }),
+      ]).start();
+    });
+  };
 
   const handleNext = () => {
-    const error = steps[currentStep].validate?.() || '';
-    if (error) {
-      setGeneralError(error);
-      return;
-    }
-
+    const errs = validate(step, formData);
+    if (Object.keys(errs).length) { setErrors(errs); return; }
+    setErrors({});
     setGeneralError('');
-
-    if (currentStep < steps.length - 1) {
-      // Slide out current → change step → slide in new
-      Animated.timing(slideAnim, {
-        toValue: -SCREEN_WIDTH,
-        duration: 300,
-        easing: Easing.out(Easing.ease),
-        useNativeDriver: true,
-      }).start(() => {
-        setCurrentStep(currentStep + 1);
-        slideAnim.setValue(SCREEN_WIDTH); // start from right
-
-        Animated.timing(slideAnim, {
-          toValue: 0,
-          duration: 300,
-          easing: Easing.out(Easing.ease),
-          useNativeDriver: true,
-        }).start();
-      });
+    if (step < STEPS.length - 1) {
+      animateStep(1, () => setStep(s => s + 1));
     } else {
       handleSubmit();
     }
   };
 
   const handleBack = () => {
-    if (currentStep > 0) {
-      Animated.timing(slideAnim, {
-        toValue: SCREEN_WIDTH,
-        duration: 300,
-        easing: Easing.out(Easing.ease),
-        useNativeDriver: true,
-      }).start(() => {
-        setCurrentStep(currentStep - 1);
-        slideAnim.setValue(-SCREEN_WIDTH);
-
-        Animated.timing(slideAnim, {
-          toValue: 0,
-          duration: 300,
-          easing: Easing.out(Easing.ease),
-          useNativeDriver: true,
-        }).start();
-      });
+    if (step > 0) {
+      setErrors({});
+      animateStep(-1, () => setStep(s => s - 1));
     }
   };
 
   const handleSubmit = async () => {
     setLoading(true);
-    setGeneralError('');
-
     try {
       await register({
-        firstName: formData.firstName.trim(),
-        lastName: formData.lastName.trim(),
-        email: formData.email.trim().toLowerCase(),
-        phone: formData.phone.trim(),
-        password: formData.password,
+        firstName:   formData.firstName.trim(),
+        lastName:    formData.lastName.trim(),
+        email:       formData.email.trim().toLowerCase(),
+        phone:       formData.phone.trim(),
+        password:    formData.password,
         dateOfBirth: formData.dateOfBirth.trim() || undefined,
       });
-      // Navigation handled by auth context usually
-    } catch (error: any) {
-      setGeneralError(error.message || 'Registration failed. Please try again.');
+    } catch (e: any) {
+      setGeneralError(e.message || 'Registration failed. Please try again.');
     } finally {
       setLoading(false);
     }
   };
 
-  // ────────────────────────────────────────────────────────
-  // RENDER
-  // ────────────────────────────────────────────────────────
+  const set = (key: keyof FormData) => (val: string) => {
+    setFormData(f => ({ ...f, [key]: val }));
+    if (errors[key]) setErrors(e => ({ ...e, [key]: undefined }));
+  };
+
+  const progress = (step + 1) / STEPS.length;
+
   return (
     <>
-      <StatusBar barStyle="dark-content" backgroundColor="#ffffff" />
-      <View style={styles.container}>
+      <StatusBar barStyle="dark-content" backgroundColor="transparent" translucent />
+      <SafeAreaView style={s.safe}>
+
+        {/* Gradient background */}
+        <LinearGradient
+          colors={['#f0fafa', '#f7f4ff', '#fff8f2', '#ffffff']}
+          start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
+          style={StyleSheet.absoluteFill}
+          pointerEvents="none"
+        />
+
         <KeyboardAvoidingView
           behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
           style={{ flex: 1 }}
@@ -248,312 +189,192 @@ export default function RegisterScreen() {
         >
           <ScrollView
             ref={scrollRef}
-            contentContainerStyle={styles.scrollContent}
+            contentContainerStyle={s.scroll}
             keyboardShouldPersistTaps="handled"
             showsVerticalScrollIndicator={false}
           >
-            <View style={styles.header}>
-              <Image style={styles.tinyLogo} source={require('../../assets/images/logo.jpg')} />
-            </View>
 
-            <View style={styles.progressContainer}>
-              <View style={styles.progressBar}>
+            {/* ── Progress dots ── */}
+            <View style={s.dotsRow}>
+              {STEPS.map((_, i) => (
                 <View
-                  style={[
-                    styles.progressFill,
-                    { width: `${((currentStep + 1) / steps.length) * 100}%` },
-                  ]}
+                  key={i}
+                  style={[s.dot, i === step && s.dotActive, i < step && s.dotDone]}
                 />
-              </View>
-              <Text style={styles.stepText}>
-                Step {currentStep + 1} of {steps.length}
-              </Text>
+              ))}
             </View>
 
-            {/* Animated content container */}
-            <Animated.View
-              style={{
-                transform: [{ translateX: slideAnim }],
-                opacity: slideAnim.interpolate({
-                  inputRange: [-SCREEN_WIDTH, 0, SCREEN_WIDTH],
-                  outputRange: [0, 1, 0],
-                }),
-              }}
-            >
-              <Text style={styles.title}>{steps[currentStep].title}</Text>
+            {/* ── Animated content ── */}
+            <Animated.View style={{ transform: [{ translateX: slideAnim }], opacity: fadeAnim }}>
 
+              {/* Heading */}
+              <View style={s.headingWrap}>
+                <Text style={s.heading}>{STEPS[step].heading}</Text>
+              </View>
+
+              {/* General error */}
               {generalError ? (
-                <View style={styles.errorContainer}>
-                  <Ionicons name="alert-circle-outline" size={20} color="#ef4444" />
-                  <Text style={styles.errorText}>{generalError}</Text>
+                <View style={s.errorBanner}>
+                  <Ionicons name="alert-circle-outline" size={16} color="#ef4444" />
+                  <Text style={s.errorBannerText}>{generalError}</Text>
                 </View>
               ) : null}
 
-              {steps[currentStep].render()}
+              {/* Fields for this step */}
+              <View style={s.form}>
+                {STEPS[step].fields.map(field => {
+                  const cfg = FIELD_CONFIG[field];
+                  return (
+                    <FieldPill
+                      key={field}
+                      label={cfg.label}
+                      icon={cfg.icon}
+                      value={formData[field]}
+                      onChange={set(field)}
+                      placeholder={cfg.placeholder}
+                      keyboard={cfg.keyboard}
+                      secure={cfg.secure}
+                      autoCapitalize={cfg.autoCapitalize}
+                      error={errors[field]}
+                    />
+                  );
+                })}
+              </View>
+
             </Animated.View>
 
-            {/* Navigation buttons - fixed at bottom */}
-            <View style={styles.buttonContainer}>
-              {currentStep > 0 && (
-                <TouchableOpacity style={styles.backButton} onPress={handleBack}>
-                  <Ionicons name="arrow-back" size={22} color="#07918f" />
-                  <Text style={styles.backButtonText}>Back</Text>
+            {/* ── Buttons ── */}
+            <View style={s.btnRow}>
+              {step > 0 ? (
+                <TouchableOpacity style={s.backBtn} onPress={handleBack} activeOpacity={0.7}>
+                  <Ionicons name="arrow-back" size={18} color="#0cadab" />
+                  <Text style={s.backBtnText}>Back</Text>
                 </TouchableOpacity>
-              )}
+              ) : <View />}
 
               <TouchableOpacity
-                style={[
-                  styles.nextButton,
-                  loading && styles.disabledButton,
-                ]}
+                style={[s.nextBtn, loading && { opacity: 0.65 }]}
                 onPress={handleNext}
                 disabled={loading}
+                activeOpacity={0.85}
               >
-                {loading ? (
-                  <ActivityIndicator color="#ffffff" size="small" />
-                ) : (
-                  <Text style={styles.nextButtonText}>
-                    {currentStep === steps.length - 1 ? 'CREATE ACCOUNT' : 'NEXT'}
-                  </Text>
-                )}
+                {loading
+                  ? <ActivityIndicator color="#fff" size="small" />
+                  : <Text style={s.nextBtnText}>
+                      {step === STEPS.length - 1 ? 'Create Account' : 'Continue'}
+                    </Text>
+                }
               </TouchableOpacity>
             </View>
 
-            <View style={styles.footer}>
-              <Link href="/(auth)/login" asChild>
-                <Text style={styles.loginText}>
-                  Already have an account? <Text style={styles.loginBold}>Sign in</Text>
-                </Text>
-              </Link>
-              <Text style={styles.termsText}>
-                By continuing, you agree to our Terms of Service and Privacy Policy
-              </Text>
-            </View>
+            <View style={{ flex: 1 }} />
           </ScrollView>
+
+          {/* ── Footer ── */}
+          <View style={s.footer}>
+            <Link href="/(auth)/login" asChild>
+              <TouchableOpacity>
+                <Text style={s.footerText}>
+                  Already have an account?{'  '}
+                  <Text style={s.footerLink}>Sign in</Text>
+                </Text>
+              </TouchableOpacity>
+            </Link>
+          </View>
+
         </KeyboardAvoidingView>
-      </View>
+      </SafeAreaView>
     </>
   );
 }
 
-// ─── Reusable Input Components ────────────────────────────────────────────────────────
-function InputGroup({
-  label,
-  icon,
-  value,
-  onChange,
-  placeholder,
-  keyboardType = 'default',
-  autoComplete,
-  autoCapitalize = 'words',
+// ─── FieldPill ────────────────────────────────────────────────────────────────
+function FieldPill({
+  label, icon, value, onChange, placeholder,
+  keyboard = 'default', secure = false,
+  autoCapitalize = 'sentences', error,
 }: {
-  label: string;
-  icon: string;
-  value: string;
-  onChange: (text: string) => void;
-  placeholder: string;
-  keyboardType?: 'default' | 'email-address' | 'phone-pad' | 'numbers-and-punctuation';
-  autoComplete?: string;
-  autoCapitalize?: 'none' | 'words' | 'sentences';
+  label: string; icon: string; value: string;
+  onChange: (t: string) => void; placeholder: string;
+  keyboard?: 'default' | 'email-address' | 'phone-pad' | 'numbers-and-punctuation';
+  secure?: boolean; autoCapitalize?: 'none' | 'words' | 'sentences';
+  error?: string;
 }) {
+  const [show, setShow] = useState(false);
   return (
-    <View style={styles.inputGroup}>
-      <Text style={styles.label}>{label}</Text>
-      <View style={styles.inputContainer}>
-        <Ionicons name={icon} size={20} color="#8696a0" style={styles.inputIcon} />
+    <View style={s.fieldGroup}>
+      <Text style={s.label}>{label}</Text>
+      <View style={[s.pill, error ? s.pillErr : null]}>
+        <Ionicons name={icon as any} size={18} color="#C0C0C0" style={s.fieldIcon} />
         <TextInput
-          style={styles.input}
+          style={[s.pillInput, { flex: 1 }]}
+          value={value}
+          onChangeText={onChange}
           placeholder={placeholder}
-          value={value}
-          onChangeText={onChange}
-          keyboardType={keyboardType}
-          autoComplete={autoComplete}
+          placeholderTextColor="#C8C8C8"
+          keyboardType={keyboard}
           autoCapitalize={autoCapitalize}
+          secureTextEntry={secure && !show}
         />
+        {secure && (
+          <TouchableOpacity
+            onPress={() => setShow(v => !v)}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+          >
+            <Ionicons name={show ? 'eye-outline' : 'eye-off-outline'} size={18} color="#C0C0C0" />
+          </TouchableOpacity>
+        )}
       </View>
+      {error ? <Text style={s.fieldErr}>{error}</Text> : null}
     </View>
   );
 }
 
-function PasswordGroup({
-  label,
-  value,
-  onChange,
-}: {
-  label: string;
-  value: string;
-  onChange: (text: string) => void;
-}) {
-  const [showPassword, setShowPassword] = useState(false);
+// ─── Styles ───────────────────────────────────────────────────────────────────
+const s = StyleSheet.create({
+  safe:   { flex: 1, backgroundColor: '#f0fafa' },
+  scroll: { flexGrow: 1, paddingBottom: 16 },
 
-  return (
-    <View style={styles.inputGroup}>
-      <Text style={styles.label}>{label}</Text>
-      <View style={styles.inputContainer}>
-        <Ionicons name="lock-closed-outline" size={20} color="#8696a0" style={styles.inputIcon} />
-        <TextInput
-          style={styles.input}
-          placeholder="••••••••"
-          value={value}
-          onChangeText={onChange}
-          secureTextEntry={!showPassword}
-        />
-        <TouchableOpacity onPress={() => setShowPassword(!showPassword)} style={styles.eyeIcon}>
-          <Ionicons name={showPassword ? 'eye-off' : 'eye'} size={20} color="#8696a0" />
-        </TouchableOpacity>
-      </View>
-    </View>
-  );
-}
+  // Progress dots
+  dotsRow: { flexDirection: 'row', justifyContent: 'center', gap: 8, paddingTop: 24, marginBottom: 8 },
+  dot:     { width: 6, height: 6, borderRadius: 3, backgroundColor: '#DEDEDE' },
+  dotActive:{ width: 20, height: 6, borderRadius: 3, backgroundColor: '#0cadab' },
+  dotDone: { backgroundColor: '#a8e6e5' },
 
-// ─── Styles ────────────────────────────────────────────────────────────────────────────
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#ffffff',
-  },
-  scrollContent: {
-    paddingBottom: 60,
-    paddingHorizontal: 0,
-  },
-  header: {
-    alignItems: 'center',
-    marginTop: 50,
-    marginBottom: 20,
-  },
-  tinyLogo: {
-    width: 80,
-    height: 80,
-    borderRadius: 16,
-  },
-  progressContainer: {
-    paddingHorizontal: 32,
-    marginBottom: 24,
-    alignItems: 'center',
-  },
-  progressBar: {
-    height: 6,
-    width: '100%',
-    backgroundColor: '#e5e7eb',
-    borderRadius: 3,
-    overflow: 'hidden',
-  },
-  progressFill: {
-    height: '100%',
-    backgroundColor: '#07918f',
-  },
-  stepText: {
-    marginTop: 8,
-    fontSize: 14,
-    color: '#8696a0',
-  },
-  title: {
-    fontSize: 24,
-    fontWeight: '600',
-    color: '#1f2937',
-    textAlign: 'center',
-    marginBottom: 24,
-    paddingHorizontal: 32,
-  },
-  errorContainer: {
-    flexDirection: 'row',
-    backgroundColor: '#fef2f2',
-    borderRadius: 12,
-    padding: 12,
-    marginHorizontal: 32,
-    marginBottom: 20,
-    alignItems: 'center',
-  },
-  errorText: {
-    color: '#dc2626',
-    marginLeft: 8,
-    flex: 1,
-    fontSize: 14,
-  },
-  inputGroup: {
-    marginBottom: 24,
-    paddingHorizontal: 32,
-  },
-  label: {
-    fontSize: 15,
-    fontWeight: '500',
-    color: '#1f2937',
-    marginBottom: 8,
-    marginLeft: 4,
-  },
-  inputContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: '#e5e7eb',
-    borderRadius: 14,
-    paddingHorizontal: 16,
-    paddingVertical: 4,
-  },
-  inputIcon: {
-    marginRight: 12,
-  },
-  eyeIcon: {
-    padding: 8,
-  },
-  input: {
-    flex: 1,
-    fontSize: 16,
-    color: '#1f2937',
-    paddingVertical: 12,
-  },
-  buttonContainer: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    paddingHorizontal: 32,
-    marginTop: 32,
-    alignItems: 'center',
-  },
-  backButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-  },
-  backButtonText: {
-    color: '#07918f',
-    fontSize: 16,
-    fontWeight: '500',
-    marginLeft: 8,
-  },
-  nextButton: {
-    backgroundColor: '#07918f',
-    borderRadius: 30,
-    paddingVertical: 16,
-    paddingHorizontal: 40,
-    minWidth: 160,
-    alignItems: 'center',
-  },
-  disabledButton: {
-    opacity: 0.6,
-  },
-  nextButtonText: {
-    color: '#ffffff',
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  footer: {
-    alignItems: 'center',
-    marginTop: 40,
-    paddingHorizontal: 32,
-  },
-  loginText: {
-    color: '#8696a0',
-    fontSize: 15,
-    marginBottom: 16,
-  },
-  loginBold: {
-    color: '#07918f',
-    fontWeight: '600',
-  },
-  termsText: {
-    color: '#8696a0',
-    fontSize: 12,
-    textAlign: 'center',
-  },
+  // Heading — matches LoginScreen
+  headingWrap: { paddingHorizontal: 28, marginBottom: 32, marginTop: 16 },
+  heading: { fontSize: 40, fontWeight: '400', color: '#111111', letterSpacing: -0.8, lineHeight: 46 },
+
+  // Error banner — identical to LoginScreen
+  errorBanner: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#fef2f2', borderWidth: 1, borderColor: '#fecaca', borderRadius: 12, padding: 12, marginHorizontal: 28, marginBottom: 16 },
+  errorBannerText: { flex: 1, color: '#dc2626', fontSize: 13 },
+
+  // Form
+  form:       { paddingHorizontal: 28 },
+  fieldGroup: { marginBottom: 20 },
+
+  // Label — identical to LoginScreen
+  label: { fontSize: 13, fontWeight: '500', color: '#AAAAAA', marginBottom: 8, marginLeft: 2 },
+
+  // Pill — identical to LoginScreen
+  pill:      { flexDirection: 'row', alignItems: 'center', borderWidth: 1.5, borderColor: '#EBEBEB', borderRadius: 18, paddingHorizontal: 20, paddingVertical: 15, backgroundColor: '#ffffff' },
+  pillErr:   { borderColor: '#ef4444' },
+  pillInput: { fontSize: 16, color: '#111111', fontWeight: '400', padding: 0, margin: 0 },
+  fieldIcon: { marginRight: 10 },
+  fieldErr:  { fontSize: 12, color: '#ef4444', marginTop: 6, marginLeft: 4 },
+
+  // Buttons row
+  btnRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 28, marginTop: 12 },
+
+  backBtn:     { flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 12, paddingHorizontal: 4 },
+  backBtnText: { color: '#0cadab', fontSize: 15, fontWeight: '500' },
+
+  // Next button — matches LoginScreen loginBtn
+  nextBtn:     { flex: 1, marginLeft: 16, backgroundColor: '#111111', borderRadius: 20, paddingVertical: 18, alignItems: 'center', justifyContent: 'center', shadowColor: '#000', shadowOpacity: 0.10, shadowRadius: 28, shadowOffset: { width: 0, height: 8 }, elevation: 4 },
+  nextBtnText: { color: '#ffffff', fontSize: 17, fontWeight: '700', letterSpacing: 0.1 },
+
+  // Footer — identical to LoginScreen
+  footer:     { backgroundColor: 'transparent', alignItems: 'center', paddingBottom: Platform.OS === 'ios' ? 32 : 20, paddingTop: 14 },
+  footerText: { fontSize: 14, color: '#AAAAAA' },
+  footerLink: { color: '#111111', fontWeight: '700', textDecorationLine: 'underline' },
 });

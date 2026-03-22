@@ -1,157 +1,102 @@
-import React, { useEffect, useRef } from 'react';
-import { View, Text, StyleSheet, Animated, Dimensions } from 'react-native';
 import { useRouter } from 'expo-router';
-import { COLORS, FONT_SIZES, FONT_WEIGHTS } from '@/constants/theme';
+import { LinearGradient } from 'expo-linear-gradient';
+import React, { useEffect, useRef } from 'react';
+import { Animated, Dimensions, Easing, StatusBar, StyleSheet, Text, View } from 'react-native';
 
-const { width } = Dimensions.get('window');
+const { width: W } = Dimensions.get('window');
 
 export default function SplashScreen() {
-  const router = useRouter();
-  const fadeAnim = useRef(new Animated.Value(0)).current;
-  const scaleAnim = useRef(new Animated.Value(0.3)).current;
-  const slideAnim = useRef(new Animated.Value(50)).current;
+  const router   = useRouter();
+  const opacity  = useRef(new Animated.Value(0)).current;
+  const scale    = useRef(new Animated.Value(0.92)).current;
+  const tagOpacity = useRef(new Animated.Value(0)).current;
+  const exitOpacity = useRef(new Animated.Value(1)).current;
 
   useEffect(() => {
-    // Start animations
+    // Fade + subtle scale in
     Animated.parallel([
-      Animated.timing(fadeAnim, {
-        toValue: 1,
-        duration: 800,
-        useNativeDriver: true,
-      }),
-      Animated.spring(scaleAnim, {
-        toValue: 1,
-        tension: 50,
-        friction: 7,
-        useNativeDriver: true,
-      }),
-      Animated.timing(slideAnim, {
-        toValue: 0,
-        duration: 800,
-        useNativeDriver: true,
-      }),
+      Animated.timing(opacity, { toValue: 1, duration: 700, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
+      Animated.spring(scale,   { toValue: 1, tension: 60, friction: 12, useNativeDriver: true }),
     ]).start();
 
-    // Navigate to login after animation
-    const timer = setTimeout(() => {
-      Animated.timing(fadeAnim, {
-        toValue: 0,
-        duration: 500,
-        useNativeDriver: true,
-      }).start(() => {
-        router.replace('/(auth)/login');
-      });
-    }, 5000); // 5 seconds - adjust this number to change splash duration
+    // Tagline fades in slightly after
+    setTimeout(() => {
+      Animated.timing(tagOpacity, { toValue: 1, duration: 600, useNativeDriver: true }).start();
+    }, 500);
 
-    return () => clearTimeout(timer);
+    // Fade out and navigate
+    setTimeout(() => {
+      Animated.timing(exitOpacity, { toValue: 0, duration: 500, easing: Easing.in(Easing.cubic), useNativeDriver: true })
+        .start(() => router.replace('/(auth)/login'));
+    }, 2800);
   }, []);
 
   return (
-    <View style={styles.container}>
-      <Animated.View
-        style={[
-          styles.content,
-          {
-            opacity: fadeAnim,
-            transform: [{ scale: scaleAnim }],
-          },
-        ]}
-      >
-        {/* Logo Icon */}
-        <View style={styles.logoContainer}>
-          <View style={styles.logoCircle}>
-            <Text style={styles.logoIcon}>🎧</Text>
+    <Animated.View style={[s.root, { opacity: exitOpacity }]}>
+      <StatusBar barStyle="dark-content" backgroundColor="transparent" translucent />
+
+      <LinearGradient
+        colors={['#f0fafa', '#f7f4ff', '#fff8f2', '#ffffff']}
+        start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
+        style={StyleSheet.absoluteFill}
+      />
+
+      <Animated.View style={[s.centre, { opacity, transform: [{ scale }] }]}>
+
+        {/* Logo mark */}
+        <View style={s.logoShadow}>
+          <View style={s.logoClip}>
+            <LinearGradient
+              colors={['#0ee7e5', '#0cadab', '#057e7d']}
+              start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
+              style={s.logoGrad}
+            >
+              <View style={s.ring}>
+                <Text style={s.letter}>B</Text>
+              </View>
+            </LinearGradient>
           </View>
         </View>
 
-        {/* App Name */}
-        <Animated.View
-          style={{
-            transform: [{ translateY: slideAnim }],
-          }}
-        >
-          <Text style={styles.title}>DJ Rental Pro</Text>
-          <Text style={styles.subtitle}>Premium Equipment. Anytime.</Text>
-        </Animated.View>
+        {/* Name */}
+        <Text style={s.name}>basswala</Text>
 
-        {/* Loading Indicator */}
-        <View style={styles.loadingContainer}>
-          <View style={styles.loadingBar}>
-            <Animated.View
-              style={[
-                styles.loadingProgress,
-                {
-                  transform: [{
-                    scaleX: fadeAnim.interpolate({
-                      inputRange: [0, 1],
-                      outputRange: [0, 1],
-                    }),
-                  }],
-                },
-              ]}
-            />
-          </View>
-        </View>
+        {/* Tagline */}
+        <Animated.Text style={[s.tag, { opacity: tagOpacity }]}>
+          rent · play · perform
+        </Animated.Text>
+
       </Animated.View>
-    </View>
+    </Animated.View>
   );
 }
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: '#ffffff',
+const s = StyleSheet.create({
+  root:   { flex: 1, backgroundColor: '#f0fafa' },
+  centre: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 0 },
+
+  logoShadow: {
+    width: 88, height: 88, borderRadius: 22,
+    backgroundColor: '#fff',
+    shadowColor: '#000', shadowOpacity: 0.10, shadowRadius: 20, shadowOffset: { width: 0, height: 6 },
+    elevation: 6, marginBottom: 28,
   },
-  content: {
-    alignItems: 'center',
-    justifyContent: 'center',
+  logoClip: { width: 88, height: 88, borderRadius: 22, overflow: 'hidden' },
+  logoGrad: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  ring: {
+    width: 50, height: 50, borderRadius: 25,
+    borderWidth: 1.5, borderColor: 'rgba(255,255,255,0.4)',
+    backgroundColor: 'rgba(255,255,255,0.15)',
+    alignItems: 'center', justifyContent: 'center',
   },
-  logoContainer: {
-    marginBottom: 40,
+  letter: { fontSize: 24, fontWeight: '800', color: '#fff' },
+
+  name: {
+    fontSize: 32, fontWeight: '300', color: '#111',
+    letterSpacing: 5, marginBottom: 10,
   },
-  logoCircle: {
-    width: 120,
-    height: 120,
-    borderRadius: 60,
-    backgroundColor: '#f8f9fa',
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderWidth: 3,
-    borderColor: '#6C63FF',
-  },
-  logoIcon: {
-    fontSize: 60,
-  },
-  title: {
-    fontSize: FONT_SIZES.xxxl,
-    fontWeight: FONT_WEIGHTS.bold,
-    color: '#1f2937',
-    marginBottom: 8,
-    textAlign: 'center',
-  },
-  subtitle: {
-    fontSize: FONT_SIZES.md,
-    color: '#8696a0',
-    textAlign: 'center',
-    fontWeight: FONT_WEIGHTS.medium,
-  },
-  loadingContainer: {
-    marginTop: 60,
-    width: width * 0.6,
-  },
-  loadingBar: {
-    height: 4,
-    backgroundColor: '#e5e7eb',
-    borderRadius: 2,
-    overflow: 'hidden',
-  },
-  loadingProgress: {
-    width: '100%',
-    height: '100%',
-    backgroundColor: '#6C63FF',
-    borderRadius: 2,
-    transformOrigin: 'left center',
+  tag: {
+    fontSize: 11, fontWeight: '500', color: '#8696a0',
+    letterSpacing: 2.5, textTransform: 'uppercase',
   },
 });

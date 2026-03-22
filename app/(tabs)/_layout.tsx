@@ -12,6 +12,7 @@ import {
 } from "react-native";
 import { useAuth } from "@/context/AuthContext";
 import { Redirect } from "expo-router";
+import { addScrollListener, addSheetListener } from "@/utils/tabBarEmitter";
 
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
 
@@ -24,9 +25,10 @@ const TABS = [
   { name: "profile",  label: "Profile",  icon: "person",   iconOutline: "person-outline"   },
 ];
 
-const BAR_H         = 64;
-const BAR_SIDE_PAD  = 16; // margin from screen edges
-const BAR_WIDTH     = SCREEN_WIDTH - BAR_SIDE_PAD * 2;
+const BAR_H        = 64;
+const BAR_SIDE_PAD = 16;
+const BAR_WIDTH    = SCREEN_WIDTH - BAR_SIDE_PAD * 2;
+const HIDE_OFFSET  = BAR_H + (Platform.OS === "ios" ? 40 : 28);
 
 // ─── Animated Tab Button ──────────────────────────────────────────────────────
 
@@ -41,43 +43,32 @@ function TabButton({
   onPress: () => void;
   onLongPress: () => void;
 }) {
-  // 0 = inactive, 1 = active
   const progress = useRef(new Animated.Value(isFocused ? 1 : 0)).current;
 
   useEffect(() => {
     Animated.spring(progress, {
       toValue: isFocused ? 1 : 0,
-      useNativeDriver: false, // needed for backgroundColor
+      useNativeDriver: false,
       tension: 100,
       friction: 14,
     }).start();
   }, [isFocused]);
 
-  // Pill background color: transparent → #101720
   const pillBg = progress.interpolate({
     inputRange: [0, 1],
     outputRange: ["rgba(16,23,32,0)", "rgba(16,23,32,1)"],
   });
 
-  // Label width: 0 → auto (we use maxWidth trick)
   const labelMaxW = progress.interpolate({
     inputRange: [0, 1],
     outputRange: [0, 80],
   });
 
-  // Label opacity
   const labelOp = progress.interpolate({
     inputRange: [0, 0.5, 1],
     outputRange: [0, 0, 1],
   });
 
-  // Icon color: #8696a0 → #ffffff
-  const iconColor = progress.interpolate({
-    inputRange: [0, 1],
-    outputRange: ["#8696a0", "#ffffff"],
-  });
-
-  // Subtle scale on the whole pill
   const pillScale = progress.interpolate({
     inputRange: [0, 1],
     outputRange: [0.96, 1],
@@ -90,7 +81,6 @@ function TabButton({
       style={styles.tabBtn}
       android_ripple={null}
     >
-      {/* The pill hugs the content — no absolute positioning */}
       <Animated.View
         style={[
           styles.pill,
@@ -100,9 +90,7 @@ function TabButton({
           },
         ]}
       >
-        {/* Icon */}
-        <Animated.Text style={{ color: iconColor }}>
-          {/* We use a wrapper since AnimatedIonicons isn't straightforward */}
+        <Animated.Text>
           <Ionicons
             name={(isFocused ? tab.icon : tab.iconOutline) as any}
             size={21}
@@ -110,13 +98,7 @@ function TabButton({
           />
         </Animated.Text>
 
-        {/* Label — collapses to 0 width when inactive */}
-        <Animated.View
-          style={{
-            maxWidth: labelMaxW,
-            overflow: "hidden",
-          }}
-        >
+        <Animated.View style={{ maxWidth: labelMaxW, overflow: "hidden" }}>
           <Animated.Text
             style={[styles.tabLabel, { opacity: labelOp }]}
             numberOfLines={1}
@@ -132,8 +114,79 @@ function TabButton({
 // ─── Custom Tab Bar ───────────────────────────────────────────────────────────
 
 function CustomTabBar({ state, navigation }: any) {
+  const translateY   = useRef(new Animated.Value(0)).current;
+  const lastY        = useRef(0);
+  const isHidden     = useRef(false);
+  // Separate flag so sheet-hide overrides scroll-hide and vice versa
+  const sheetOpen    = useRef(false);
+
+  const animateTo = (toValue: number) => {
+    Animated.spring(translateY, {
+      toValue,
+      useNativeDriver: true,
+      tension: 80,
+      friction: 14,
+    }).start();
+  };
+
+  // ── Sheet listener — hides bar while any booking sheet / modal is open ──
+  useEffect(() => {
+    const unsub = addSheetListener((visible: boolean) => {
+      sheetOpen.current = visible;
+      if (visible) {
+        // Sheet opened → immediately slide bar off screen
+        isHidden.current = true;
+        animateTo(HIDE_OFFSET);
+      } else {
+        // Sheet closed → slide bar back
+        isHidden.current = false;
+        animateTo(0);
+      }
+    });
+    return unsub;
+  }, [translateY]);
+
+  // ── Scroll listener — auto-hide while scrolling down ──
+  useEffect(() => {
+    const unsub = addScrollListener((currentY: number) => {
+      // Don't let scroll fight the sheet
+      if (sheetOpen.current) return;
+
+      const delta = currentY - lastY.current;
+      lastY.current = currentY;
+
+      if (currentY <= 10) {
+        if (isHidden.current) {
+          isHidden.current = false;
+          animateTo(0);
+        }
+        return;
+      }
+
+      if (delta > 6 && !isHidden.current) {
+        isHidden.current = true;
+        animateTo(HIDE_OFFSET);
+      } else if (delta < -6 && isHidden.current) {
+        isHidden.current = false;
+        animateTo(0);
+      }
+    });
+    return unsub;
+  }, [translateY]);
+
+  // ── Reset bar on tab change (only if sheet is not open) ──
+  useEffect(() => {
+    if (sheetOpen.current) return;
+    isHidden.current = false;
+    lastY.current    = 0;
+    animateTo(0);
+  }, [state.index, translateY]);
+
   return (
-    <View style={styles.barWrapper} pointerEvents="box-none">
+    <Animated.View
+      style={[styles.barWrapper, { transform: [{ translateY }] }]}
+      pointerEvents="box-none"
+    >
       <View style={styles.bar}>
         {state.routes.map((route: any, index: number) => {
           const isFocused = state.index === index;
@@ -161,16 +214,15 @@ function CustomTabBar({ state, navigation }: any) {
           );
         })}
       </View>
-    </View>
+    </Animated.View>
   );
 }
 
-// ─── Layout with Auth Check ───────────────────────────────────────────────────
+// ─── Layout ───────────────────────────────────────────────────────────────────
 
 export default function TabLayout() {
   const { isAuthenticated, isLoading } = useAuth();
 
-  // Show loading while checking auth status
   if (isLoading) {
     return (
       <View style={styles.loadingContainer}>
@@ -179,12 +231,10 @@ export default function TabLayout() {
     );
   }
 
-  // Redirect to login if not authenticated
   if (!isAuthenticated) {
     return <Redirect href="/(auth)/login" />;
   }
 
-  // Show tabs if authenticated
   return (
     <Tabs
       screenOptions={{ headerShown: false }}
@@ -200,36 +250,31 @@ export default function TabLayout() {
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
-  // Loading container
   loadingContainer: {
     flex: 1,
     justifyContent: "center",
     alignItems: "center",
     backgroundColor: "#f4f8ff",
   },
-
   barWrapper: {
     position: "absolute",
     bottom: 0,
     left: 0,
     right: 0,
     alignItems: "center",
-    // Enough bottom padding for home indicator (iOS) or nav bar (Android)
     paddingBottom: Platform.select({ ios: 28, android: 14, default: 14 }),
     paddingHorizontal: BAR_SIDE_PAD,
     pointerEvents: "box-none",
   },
-
   bar: {
     flexDirection: "row",
     alignItems: "center",
-    justifyContent: "space-evenly",  // even spacing regardless of pill width
+    justifyContent: "space-evenly",
     backgroundColor: "#ffffff",
     borderRadius: 28,
     height: BAR_H,
     width: BAR_WIDTH,
     paddingHorizontal: 10,
-    // Soft shadow
     shadowColor: "#101720",
     shadowOffset: { width: 0, height: 6 },
     shadowOpacity: 0.09,
@@ -238,16 +283,12 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "#eef0f3",
   },
-
-  // Each tab fills its flex share, centers content
   tabBtn: {
     flex: 1,
     alignItems: "center",
     justifyContent: "center",
     height: BAR_H,
   },
-
-  // The pill wraps its own content — grows/shrinks naturally with label
   pill: {
     flexDirection: "row",
     alignItems: "center",
@@ -255,15 +296,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 10,
     borderRadius: 20,
-    // No fixed width — let content drive it
   },
-
   tabLabel: {
     fontSize: 13,
     fontWeight: "700",
     color: "#ffffff",
     letterSpacing: -0.2,
-    // Prevent text wrapping during animation
     flexShrink: 0,
   },
 });

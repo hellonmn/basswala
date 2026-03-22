@@ -5,17 +5,9 @@ import axios, {
 } from "axios";
 import { secureStorage } from "./secureStorage";
 
-/**
- * API Service with built-in security features:
- * - Automatic token injection
- * - Token refresh on 401
- * - Request/Response interceptors
- * - Error handling
- */
-
 const API_BASE_URL = __DEV__
-  ? "https://indicated-volunteer-debug-work.trycloudflare.com/api" // Development
-  : "https://your-production-api.com/api"; // Production
+  ? "https://eternal-viper-hardly.ngrok-free.app/api"
+  : "https://eternal-viper-hardly.ngrok-free.app/api";
 
 class ApiService {
   private api: AxiosInstance;
@@ -29,19 +21,12 @@ class ApiService {
     this.api = axios.create({
       baseURL: API_BASE_URL,
       timeout: 15000,
-      headers: {
-        "Content-Type": "application/json",
-      },
+      headers: { "Content-Type": "application/json" },
     });
-
     this.setupInterceptors();
   }
 
-  /**
-   * Setup request and response interceptors
-   */
   private setupInterceptors(): void {
-    // Request interceptor - Add auth token to headers
     this.api.interceptors.request.use(
       async (config: InternalAxiosRequestConfig) => {
         const token = await secureStorage.getAccessToken();
@@ -50,12 +35,9 @@ class ApiService {
         }
         return config;
       },
-      (error) => {
-        return Promise.reject(error);
-      },
+      (error) => Promise.reject(error),
     );
 
-    // Response interceptor - Handle token refresh
     this.api.interceptors.response.use(
       (response) => response,
       async (error: AxiosError) => {
@@ -63,19 +45,13 @@ class ApiService {
           _retry?: boolean;
         };
 
-        // If error is 401 and we haven't retried yet
         if (error.response?.status === 401 && !originalRequest._retry) {
           if (this.isRefreshing) {
-            // If already refreshing, queue this request
             return new Promise((resolve, reject) => {
               this.failedQueue.push({ resolve, reject });
             })
-              .then(() => {
-                return this.api(originalRequest);
-              })
-              .catch((err) => {
-                return Promise.reject(err);
-              });
+              .then(() => this.api(originalRequest))
+              .catch((err) => Promise.reject(err));
           }
 
           originalRequest._retry = true;
@@ -83,30 +59,23 @@ class ApiService {
 
           try {
             const refreshToken = await secureStorage.getRefreshToken();
-            if (!refreshToken) {
-              throw new Error("No refresh token available");
-            }
+            if (!refreshToken) throw new Error("No refresh token available");
 
-            // Refresh the token
             const response = await axios.post(`${API_BASE_URL}/auth/refresh`, {
               refreshToken,
             });
 
-            const { accessToken, refreshToken: newRefreshToken } =
-              response.data;
+            const { accessToken, refreshToken: newRefreshToken } = response.data;
             await secureStorage.saveTokens(accessToken, newRefreshToken);
 
-            // Retry all queued requests
             this.failedQueue.forEach((prom) => prom.resolve());
             this.failedQueue = [];
 
             return this.api(originalRequest);
           } catch (refreshError) {
-            // Refresh failed - clear auth and redirect to login
             this.failedQueue.forEach((prom) => prom.reject(refreshError));
             this.failedQueue = [];
             await secureStorage.clearAuth();
-            // You can emit an event here to redirect to login
             return Promise.reject(refreshError);
           } finally {
             this.isRefreshing = false;
@@ -118,25 +87,16 @@ class ApiService {
     );
   }
 
-  /**
-   * Process failed queue
-   */
   private processQueue(error: Error | null): void {
     this.failedQueue.forEach((prom) => {
-      if (error) {
-        prom.reject(error);
-      } else {
-        prom.resolve();
-      }
+      if (error) prom.reject(error);
+      else prom.resolve();
     });
     this.failedQueue = [];
   }
 
-  // ========== AUTH ENDPOINTS ==========
+  // ========== AUTH ==========
 
-  /**
-   * Register a new user - full payload matching backend
-   */
   async register(data: {
     firstName: string;
     lastName: string;
@@ -144,7 +104,7 @@ class ApiService {
     phone: string;
     password: string;
     role?: "user" | "dj" | "admin";
-    dateOfBirth?: string | null; // e.g. "1995-04-12"
+    dateOfBirth?: string | null;
     location?: {
       latitude: number;
       longitude: number;
@@ -161,31 +121,6 @@ class ApiService {
     return response.data;
   }
 
-  /**
-   * Legacy register method (name → firstName/lastName split)
-   * Use this temporarily while transitioning your UI
-   * @deprecated Prefer the full register() method
-   */
-  async registerLegacy(email: string, password: string, name: string) {
-    console.warn("registerLegacy is deprecated – please use full register payload");
-
-    const parts = name.trim().split(/\s+/);
-    const firstName = parts[0] || "";
-    const lastName = parts.slice(1).join(" ") || "";
-
-    return this.register({
-      firstName,
-      lastName: lastName || name.trim(),
-      email,
-      phone: "", // collect phone in UI soon
-      password,
-      // role, dateOfBirth, location → optional, omitted here
-    });
-  }
-
-  /**
-   * Login with email or phone + optional location update
-   */
   async login(credentials: {
     email?: string;
     phone?: string;
@@ -199,21 +134,16 @@ class ApiService {
     if (!credentials.email && !credentials.phone) {
       throw new Error("Email or phone is required for login");
     }
-
     const response = await this.api.post("/auth/login", credentials);
     return response.data;
   }
 
-  /**
-   * Get current authenticated user's profile (/auth/me)
-   */
   async getMe() {
     const response = await this.api.get("/auth/me");
     return response.data;
   }
 
   async logout() {
-    // If your backend logout endpoint still expects refreshToken
     const refreshToken = await secureStorage.getRefreshToken();
     try {
       await this.api.post("/auth/logout", { refreshToken });
@@ -233,9 +163,6 @@ class ApiService {
     return response.data;
   }
 
-  /**
-   * Update user's current location
-   */
   async updateLocation(data: {
     latitude: number;
     longitude: number;
@@ -245,9 +172,6 @@ class ApiService {
     return response.data;
   }
 
-  /**
-   * Update user profile fields
-   */
   async updateProfile(data: Partial<{
     firstName?: string;
     lastName?: string;
@@ -260,21 +184,14 @@ class ApiService {
     return response.data;
   }
 
-  // ========== USER ENDPOINTS ==========
+  // ========== USER ==========
 
   async getProfile() {
-    // Note: you had /users/profile – keeping it, but consider aligning with /auth/me
     const response = await this.api.get("/users/profile");
     return response.data;
   }
 
-  async updateProfileLegacy(data: any) {
-    // If you still use /users/profile PUT somewhere – consider migrating to /auth/profile
-    const response = await this.api.put("/users/profile", data);
-    return response.data;
-  }
-
-  // ========== DJ EQUIPMENT ENDPOINTS ==========
+  // ========== EQUIPMENT ==========
 
   async getEquipment(params?: { category?: string; search?: string }) {
     const response = await this.api.get("/equipment", { params });
@@ -286,25 +203,78 @@ class ApiService {
     return response.data;
   }
 
-  // ========== RENTAL ENDPOINTS ==========
+  // ========== RENTALS ==========
 
+  /**
+   * Create a rental AFTER payment is verified.
+   * Maps to: POST /api/payments/create-booking
+   *
+   * FIXED: was incorrectly calling /payments/create-rental (404).
+   * Backend route is /payments/create-booking (paymentController.createBookingWithPayment).
+   *
+   * Requires a Payment record with status='success' in the DB
+   * (created by verifyPayment before this is called).
+   */
   async createRental(data: {
-    equipmentId: string;
+    equipmentId: string;      // maps to djId in backend — update if you add an Equipment model
     startDate: string;
     endDate: string;
     deliveryAddress?: string;
+    paymentId?: string;       // razorpay_payment_id
+    paymentMethod?: string;
+    razorpayOrderId?: string; // razorpay_order_id
   }) {
-    const response = await this.api.post("/rentals", data);
-    return response.data;
+    // Calculate duration in days from startDate → endDate
+    const start = new Date(data.startDate);
+    const end   = new Date(data.endDate);
+    const durationDays = Math.max(
+      1,
+      Math.round((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)),
+    );
+
+    // POST /api/payments/create-booking
+    const response = await this.api.post("/payments/create-booking", {
+      djId:               data.equipmentId,       // your Equipment ID — rename field if backend changes
+      razorpay_order_id:  data.razorpayOrderId,
+      razorpay_payment_id: data.paymentId,
+      eventDetails: {
+        eventType:        "Other",                // default; pass from UI if available
+        eventDate:        data.startDate,
+        startTime:        "10:00",                // default; pass from UI if available
+        endTime:          "18:00",                // default; pass from UI if available
+        duration:         durationDays,
+        guestCount:       null,
+        specialRequests:  null,
+        basePrice:        0,                      // backend derives from Payment record
+        additionalCharges: [],
+      },
+      eventLocation: {
+        latitude:         0,                      // pass real coordinates from BookingFlowScreen if available
+        longitude:        0,
+        street:           data.deliveryAddress ?? "",
+        city:             "",
+        state:            "",
+        zipCode:          "",
+        country:          "India",
+      },
+    });
+
+    // Normalise response so callers can use res.rental.id OR res.booking.id
+    const raw = response.data;
+    return {
+      ...raw,
+      rental: raw.booking ?? raw.rental ?? null,
+    };
   }
 
   async getRentals(params?: { status?: string }) {
-    const response = await this.api.get("/rentals", { params });
+    // GET /api/users/bookings  (lists the logged-in user's bookings)
+    const response = await this.api.get("/users/bookings", { params });
     return response.data;
   }
 
   async getRentalById(id: string) {
-    const response = await this.api.get(`/rentals/${id}`);
+    const response = await this.api.get(`/bookings/${id}`);
     return response.data;
   }
 
@@ -313,19 +283,103 @@ class ApiService {
     return response.data;
   }
 
-  // ========== PAYMENT ENDPOINTS ==========
+  // ========== PAYMENTS ==========
 
-  async createPaymentIntent(rentalId: string) {
-    const response = await this.api.post("/payments/create-intent", {
-      rentalId,
+  /**
+   * Step 1 — Create a Razorpay order.
+   * Pass amount in rupees — backend converts to paise.
+   * Returns: { orderId, amount, currency, keyId }
+   */
+  async createPaymentOrder(amountInRupees: number) {
+    const response = await this.api.post("/payments/create-order", {
+      amount:   amountInRupees,
+      currency: "INR",
+      notes:    { source: "basswala_app" },
     });
     return response.data;
   }
 
-  async confirmPayment(paymentIntentId: string) {
-    const response = await this.api.post("/payments/confirm", {
-      paymentIntentId,
+  /**
+   * Step 2 — Verify Razorpay signature after UPI Intent or Card payment.
+   * Must be called BEFORE createRental so the Payment DB record is 'success'.
+   * Returns: { success, verified, paymentId, status }
+   */
+  async verifyPayment(data: {
+    orderId:   string;
+    paymentId: string;
+    signature: string;
+  }) {
+    const response = await this.api.post("/payments/verify-payment", {
+      razorpay_order_id:   data.orderId,
+      razorpay_payment_id: data.paymentId,
+      razorpay_signature:  data.signature,
     });
+    return response.data;
+  }
+
+  /**
+   * Get payment status by Razorpay order ID.
+   * Returns: { success, payment }
+   */
+  async getPaymentStatus(orderId: string) {
+    const response = await this.api.get(`/payments/status/${orderId}`);
+    return response.data;
+  }
+
+  /**
+   * Get logged-in user's full payment history.
+   * Returns: { success, count, totalPages, currentPage, payments }
+   */
+  async getPaymentHistory(params?: { page?: number; limit?: number; status?: string }) {
+    const response = await this.api.get("/payments/history", { params });
+    return response.data;
+  }
+
+  /**
+   * UPI Collect — route through your backend (secret key stays server-side).
+   *
+   * NOTE: This endpoint does NOT exist in your current backend yet.
+   * You need to add it to routes/payments.js + paymentController.js.
+   *
+   * Until then, PaymentStep.tsx uses RazorpayCustomUI.payViaUPICollect()
+   * (SDK collect flow) which works with test keys and does NOT call this.
+   *
+   * Expected backend route: POST /api/payments/upi-collect
+   * Expected response: { success, paymentId, status }
+   */
+  async initiateUPICollect(data: {
+    orderId:  string;
+    amount:   number;
+    vpa:      string;
+    contact:  string;
+    email:    string;
+  }) {
+    const response = await this.api.post("/payments/upi-collect", data);
+    return response.data;
+  }
+
+  /**
+   * Poll UPI payment status — call every 4s until status is 'captured' or 'failed'.
+   *
+   * NOTE: This endpoint does NOT exist in your current backend yet.
+   * You need to add it to routes/payments.js + paymentController.js.
+   *
+   * Until then, PaymentStep.tsx skips this and uses the SDK collect callback directly.
+   *
+   * Expected backend route: GET /api/payments/upi-status/:paymentId
+   * Expected response: { success, status, paymentId }
+   */
+  async getUPIPaymentStatus(paymentId: string) {
+    const response = await this.api.get(`/payments/upi-status/${paymentId}`);
+    return response.data;
+  }
+
+  /**
+   * Admin only — initiate a refund for a captured payment.
+   * Returns: { success, message, refund: { id, amount, status } }
+   */
+  async initiateRefund(paymentId: string, data?: { amount?: number; reason?: string }) {
+    const response = await this.api.post(`/payments/refund/${paymentId}`, data ?? {});
     return response.data;
   }
 }
