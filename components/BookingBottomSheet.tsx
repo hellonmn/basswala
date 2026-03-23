@@ -1,1013 +1,1176 @@
 /**
  * BookingBottomSheet.tsx
  *
- * FLOW (fixed):
- *   1. User taps "Continue to Payment"
- *   2. Plane animation starts immediately (overlay inside sheet)
- *   3. createPaymentOrder() runs — plane keeps playing
- *   4. Razorpay / PaymentScreen opens AS A MODAL on top of the plane overlay
- *   5. User pays — Razorpay closes
- *   6. Plane overlay is STILL showing (never hidden between steps)
- *   7. Plane text updates to "Confirming booking…"
- *   8. createRental() runs — plane keeps playing
- *   9. Receipt step appears, plane hides
+ * Unified DJ booking sheet with your existing Razorpay Custom UI services.
  *
- * PaymentScreen is now rendered inside the existing plane overlay Modal
- * so there is zero flash of the booking sheet between payment return
- * and rental creation.
+ * Uses:
+ *   - RazorpayCustomUI   from ../services/razorpay-customui.service
+ *   - RAZORPAY_CONFIG    from ../services/razorpay.config
+ *   - apiService         from ../services/api
  *
- * BOTTOM NAV:
- *   emitSheet(true)  on open  → CustomTabBar slides away
- *   emitSheet(false) on close → CustomTabBar slides back
- *   Import path: @/utils/tabBarEmitter
+ * Flow:
+ *   1. Event Details  — fill event info, see hours / booking fee
+ *   2. Review         — confirm details before paying
+ *   3. Payment        — UPI Intent / UPI Collect / Card (custom UI)
+ *   4. Processing     — spinner, back button blocked
+ *   5. Success        — booking confirmed with payment receipt
  *
- * ANIMATION PATH: assets/animations/ (not assets/animation/)
- *
- * AUTO-NAVIGATE FIX:
- *   onBooked()      → fires silently when rental is created (no navigation side-effect)
- *   onViewBookings() → fires ONLY when user taps "View My Bookings" CTA on receipt
- *   onClose()       → just dismisses the sheet, never navigates
- *
- *   In your parent screen:
- *     onBooked={r => { /* store receipt locally if needed *\/ }}
- *     onViewBookings={() => router.push("/(tabs)/bookings")}
+ * Back confirmation alert fires on Review and Payment steps.
  */
 
 import { Ionicons } from "@expo/vector-icons";
 import { LinearGradient } from "expo-linear-gradient";
-import LottieView from "lottie-react-native";
-import React, {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
   Animated,
+  BackHandler,
   Dimensions,
   Easing,
+  Keyboard,
+  KeyboardAvoidingView,
   Modal,
   Platform,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
   TouchableOpacity,
   View,
 } from "react-native";
-import BottomSheet, {
-  BottomSheetBackdrop,
-  BottomSheetScrollView,
-} from "@gorhom/bottom-sheet";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
+import LottieView from "lottie-react-native";
+import { useAuth } from "../context/AuthContext";
+import { RAZORPAY_CONFIG } from "../services/razorpay.config";
+import {
+  RazorpayCustomUI,
+} from "../services/razorpay-customui.service";
 import { apiService } from "../services/api";
-import { emitSheet } from "@/utils/tabBarEmitter";
-import PaymentScreen from "./PaymentScreen";
 
-const { height: SCREEN_H, width: SCREEN_W } = Dimensions.get("window");
+const { height, width } = Dimensions.get("window");
 
-// ─── Types ─────────────────────────────────────────────────────────────────────
+// ─── Public Types ─────────────────────────────────────────────────────────────
 
 export interface Equipment {
   id: string;
   name: string;
   category: string;
   price: number;
-  deposit: number;
-  pickupAddress: string;
+  deposit?: number;
+  pickupAddress?: string;
   accentColor?: string;
+  minimumHours?: number;
+  [key: string]: any;
 }
 
 export interface RentalReceipt {
-  rentalId: string;
-  equipmentName: string;
-  days: number;
+  bookingId?: string | number;
+  djName: string;
+  hours: number;
   totalAmount: number;
-  paymentMethod: string;
+  bookingAmount: number;
+  eventDate: string;
+  eventType: string;
   paymentId?: string;
-  deliveryMethod: string;
-  address: string;
-  contactName: string;
-  contactPhone: string;
-  createdAt: string;
 }
-
-export interface PaymentResult {
-  success: boolean;
-  method: "upi_app" | "upi_id" | "card" | "cod";
-  paymentId?: string;
-  orderId?: string;
-  signature?: string;
-  dismissed?: boolean;
-  error?: string;
-}
-
-type DeliveryMethod = "delivery" | "pickup";
-type SheetStep      = "delivery" | "success" | "receipt";
-
-// What the plane overlay is currently doing
-type PlanePhase =
-  | "idle"          // not visible
-  | "preparing"     // createPaymentOrder in flight
-  | "paying"        // Razorpay/PaymentScreen open — plane still shows behind it
-  | "confirming";   // createRental in flight
 
 interface Props {
   visible: boolean;
-  equipment: Equipment;
-  days?: number;
+  equipment: Equipment | null;
+  days: number;
   onClose: () => void;
-  /** Fires silently when rental record is created — do NOT navigate here */
-  onBooked?: (receipt: RentalReceipt) => void;
-  /** Fires ONLY when user explicitly taps "View My Bookings" — navigate here */
-  onViewBookings?: (receipt: RentalReceipt) => void;
-  bottomNavHeight?: number;
+  onBooked: (receipt: RentalReceipt) => void;
+  onViewBookings: () => void;
 }
 
-// ─── Constants ─────────────────────────────────────────────────────────────────
+// ─── Internal types ────────────────────────────────────────────────────────────
 
-const CURRENT_USER = {
-  name: "Arjun Sharma",
-  phone: "9876543210",
-  email: "arjun@example.com",
+type Step      = "details" | "review" | "payment" | "processing" | "success";
+type PayMethod = "upi_collect" | "cash";
+
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+const EVENT_TYPES = ["Wedding","Birthday","Corporate","Club Night","House Party","College Fest","Other"];
+const PLATFORM_FEE = 499; // ₹ — replace with dynamic fetch from your settings endpoint
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+const fmtDate = (d: Date) =>
+  d.toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" });
+
+const toISO = (s: string): string => {
+  try {
+    const d = new Date(s);
+    if (!isNaN(d.getTime())) return d.toISOString().split("T")[0];
+  } catch {}
+  return new Date().toISOString().split("T")[0];
 };
 
-const SAVED_ADDRESSES = [
-  { id: "1", label: "Home",  icon: "home-outline"     as const, address: "42, Shyam Nagar, Jaipur, 302019",      pincode: "302019" },
-  { id: "2", label: "Work",  icon: "business-outline" as const, address: "Plot 9, Malviya Nagar, Jaipur, 302017", pincode: "302017" },
-  { id: "3", label: "Other", icon: "location-outline" as const, address: "15, Vaishali Nagar, Jaipur, 302021",    pincode: "302021" },
-];
-
-const PAY_LABEL: Record<string, string> = {
-  upi_app: "UPI App", upi_id: "UPI ID", card: "Card", cod: "Cash on Delivery",
+const calcEndTime = (start: string, hrs: number): string => {
+  try {
+    const [h, m] = start.split(":").map(Number);
+    const e = new Date(); e.setHours(h + hrs, m, 0);
+    return `${String(e.getHours()).padStart(2,"0")}:${String(e.getMinutes()).padStart(2,"0")}`;
+  } catch { return "22:00"; }
 };
 
-const PLANE_TEXT: Record<PlanePhase, { title: string; sub: string }> = {
-  idle:       { title: "",                      sub: ""                                  },
-  preparing:  { title: "Setting up payment…",   sub: "Hang tight, almost ready"          },
-  paying:     { title: "Processing payment…",   sub: "Do not close or go back"           },
-  confirming: { title: "Confirming booking…",   sub: "Recording your rental details"     },
+const luhn = (n: string): boolean => {
+  let s = 0, alt = false;
+  for (let i = n.length - 1; i >= 0; i--) {
+    let d = parseInt(n[i]);
+    if (alt) { d *= 2; if (d > 9) d -= 9; }
+    s += d; alt = !alt;
+  }
+  return s % 10 === 0;
 };
 
-const CTA_BAR_HEIGHT = 88;
+const cardBrand = (n: string): string => {
+  if (/^4/.test(n))         return "Visa";
+  if (/^5[1-5]/.test(n))    return "Mastercard";
+  if (/^3[47]/.test(n))     return "Amex";
+  if (/^6(0|5|22)/.test(n)) return "RuPay";
+  return "";
+};
 
-// ═══════════════════════════════════════════════════════════════════════════════
+
+// ─── Skeleton shimmer ─────────────────────────────────────────────────────────
+
+function Skeleton({ w, h, radius = 10, style }: {
+  w: number | string; h: number; radius?: number; style?: any;
+}) {
+  const anim = React.useRef(new Animated.Value(0)).current;
+
+  React.useEffect(() => {
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(anim, { toValue: 1, duration: 900, easing: Easing.inOut(Easing.ease), useNativeDriver: true }),
+        Animated.timing(anim, { toValue: 0, duration: 900, easing: Easing.inOut(Easing.ease), useNativeDriver: true }),
+      ])
+    );
+    loop.start();
+    return () => loop.stop();
+  }, []);
+
+  const opacity = anim.interpolate({ inputRange: [0, 1], outputRange: [0.35, 0.75] });
+
+  return (
+    <Animated.View
+      style={[{ width: w as any, height: h, borderRadius: radius, backgroundColor: "#e5e7eb", opacity }, style]}
+    />
+  );
+}
+
+// ─── Skeleton layouts for specific screens ────────────────────────────────────
+
+/** Shown while Razorpay order is being created (payment step) */
+function PaymentSkeleton() {
+  return (
+    <View style={{ paddingHorizontal: 20, paddingTop: 8 }}>
+      {/* Method tabs skeleton — 2 tabs */}
+      <View style={{ flexDirection: "row", gap: 8, marginBottom: 20, backgroundColor: "#f4f8ff", borderRadius: 18, padding: 4 }}>
+        <Skeleton w={(width - 40 - 12) / 2} h={50} radius={14} />
+        <Skeleton w={(width - 40 - 12) / 2} h={50} radius={14} />
+      </View>
+      {/* UPI ID label */}
+      <Skeleton w={100} h={13} radius={6} style={{ marginBottom: 12 }} />
+      {/* UPI input field */}
+      <Skeleton w="100%" h={52} radius={14} style={{ marginBottom: 12 }} />
+      {/* App chips row */}
+      <View style={{ flexDirection: "row", gap: 8 }}>
+        {[1,2,3,4].map(i => <Skeleton key={i} w={64} h={34} radius={10} />)}
+      </View>
+    </View>
+  );
+}
+
+/** Shown while UPI app list is loading */
+function UPIAppsSkeleton() {
+  return (
+    <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 10, marginTop: 14 }}>
+      {[1,2,3,4,5,6].map(i => (
+        <View key={i} style={{ width: (width - 40 - 20) / 3, alignItems: "center", gap: 8, padding: 12, borderRadius: 16, backgroundColor: "#f9fafb", borderWidth: 1.5, borderColor: "#e5e7eb" }}>
+          <Skeleton w={44} h={44} radius={12} />
+          <Skeleton w={46} h={10} radius={5} />
+        </View>
+      ))}
+    </View>
+  );
+}
+
+// ─── Component ────────────────────────────────────────────────────────────────
 
 export default function BookingBottomSheet({
-  visible,
-  equipment: eq,
-  days = 1,
-  onClose,
-  onBooked,
-  onViewBookings,
-  bottomNavHeight = 50,
+  visible, equipment, days, onClose, onBooked, onViewBookings,
 }: Props) {
-  const insets = useSafeAreaInsets();
-  const accent = eq.accentColor ?? "#0cadab";
-  const total  = eq.price * days;
-  const grand  = total + eq.deposit;
 
-  const successLottieRef = useRef<LottieView>(null);
-  const planeLottieRef   = useRef<LottieView>(null);
-  const headerFade       = useRef(new Animated.Value(0)).current;
-  const pillSlide        = useRef(new Animated.Value(30)).current;
+  // ─ Auth (for contact/email passed to Razorpay) ─
+  const { user } = useAuth();
+  const userContact = user?.phone ?? "";
+  const userEmail   = user?.email ?? "";
 
-  const snapPoints = useMemo(() => {
-    const topPct = Math.round(((SCREEN_H - bottomNavHeight - 16) / SCREEN_H) * 100);
-    return ["62%", `${topPct}%`];
-  }, [bottomNavHeight]);
+  // ─ Lottie ref for success animation ─
+  const lottieRef = useRef<LottieView>(null);
 
-  // ── State ───────────────────────────────────────────────────────────────────
-  const [step,           setStep]           = useState<SheetStep>("delivery");
-  const [planePhase,     setPlanePhase]     = useState<PlanePhase>("idle");
-  const [showPayment,    setShowPayment]    = useState(false);
-  const [deliveryMethod, setDeliveryMethod] = useState<DeliveryMethod>("delivery");
-  const [selectedAddrId, setSelectedAddrId] = useState<string | null>("1");
-  const [address,        setAddress]        = useState(SAVED_ADDRESSES[0].address);
-  const [landmark,       setLandmark]       = useState("");
-  const [pincode,        setPincode]        = useState(SAVED_ADDRESSES[0].pincode);
-  const [altContact,     setAltContact]     = useState({ enabled: false, name: "", phone: "", email: "" });
-  const [orderId,        setOrderId]        = useState("");
-  const [payResult,      setPayResult]      = useState<PaymentResult | null>(null);
-  const [receipt,        setReceipt]        = useState<RentalReceipt | null>(null);
-  const [countdown,      setCountdown]      = useState(5);
-  const successProg = useRef(new Animated.Value(0)).current;
+  // ─ Animation ─
+  const translateY = useRef(new Animated.Value(height)).current;
+  const overlayOp  = useRef(new Animated.Value(0)).current;
 
-  // Keep payResult in a ref so createRental can read the latest value
-  // without needing to be in its dependency array
-  const payResultRef = useRef<PaymentResult | null>(null);
-  useEffect(() => { payResultRef.current = payResult; }, [payResult]);
+  // ─ Step state ─
+  const [step,         setStep]         = useState<Step>("details");
+  const [error,        setError]        = useState("");
+  const [processLabel, setProcessLabel] = useState("");
 
-  // ── Declarative sheet index ─────────────────────────────────────────────────
-  const sheetIndex = useMemo(() => {
-    if (!visible) return -1;
-    if (step === "success" || step === "receipt") return 1;
-    return 0;
-  }, [visible, step]);
+  // ─ Booking form ─
+  const [eventType,       setEventType]       = useState("Wedding");
+  const [eventDate,       setEventDate]       = useState(fmtDate(new Date()));
+  const [startTime,       setStartTime]       = useState("18:00");
+  const [guestCount,      setGuestCount]      = useState("");
+  const [specialRequests, setSpecialRequests] = useState("");
+  const [hours,           setHours]           = useState(days);
+  const minHours = equipment?.minimumHours ?? 2;
 
-  // ── Notify tab bar ──────────────────────────────────────────────────────────
-  useEffect(() => {
-    emitSheet(visible);   // true  = sheet open  → tab bar hides
-                           // false = sheet closed → tab bar shows
-  }, [visible]);
+  // ─ Payment state ─
+  const [payMethod,       setPayMethod]       = useState<PayMethod>("upi_collect");
+  const [upiCollectId,    setUpiCollectId]    = useState("");
+  // UPI collect polling
+  const [collectStatus,    setCollectStatus]    = useState<"idle"|"waiting"|"approved"|"failed">("idle");
 
-  // ── Reset + entrance animation on open ─────────────────────────────────────
+  // ─ Payment receipt ─
+  const [paidPaymentId,    setPaidPaymentId]    = useState("");
+  const [razorpayOrderId,  setRazorpayOrderId]  = useState("");
+  const [bookingFee]    = useState(PLATFORM_FEE);
+  const [orderLoading, setOrderLoading] = useState(false);
+
+  // Sync hours when prop changes
+  useEffect(() => { setHours(Math.max(days, minHours)); }, [days, minHours]);
+
+  // ─── Sheet animation ───────────────────────────────────────────────────────
+
+  const openSheet = useCallback(() => {
+    Animated.parallel([
+      Animated.spring(translateY, { toValue: 0, tension: 72, friction: 13, useNativeDriver: true }),
+      Animated.timing(overlayOp, { toValue: 1, duration: 280, useNativeDriver: true }),
+    ]).start();
+  }, []);
+
+  const closeSheet = useCallback((cb?: () => void) => {
+    Keyboard.dismiss();
+    Animated.parallel([
+      Animated.timing(translateY, { toValue: height, duration: 300, useNativeDriver: true }),
+      Animated.timing(overlayOp, { toValue: 0, duration: 240, useNativeDriver: true }),
+    ]).start(() => cb?.());
+  }, []);
+
   useEffect(() => {
     if (visible) {
-      setStep("delivery");
-      setPlanePhase("idle");
-      setShowPayment(false);
-      setPayResult(null);
-      setReceipt(null);
-      headerFade.setValue(0);
-      pillSlide.setValue(30);
-      Animated.parallel([
-        Animated.timing(headerFade, { toValue: 1, duration: 380, useNativeDriver: true }),
-        Animated.spring(pillSlide,  { toValue: 0, tension: 70, friction: 10, useNativeDriver: true }),
-      ]).start();
+      // Reset all state on open
+      setStep("details"); setError("");
+      setEventType("Wedding"); setEventDate(fmtDate(new Date()));
+      setStartTime("18:00"); setGuestCount(""); setSpecialRequests("");
+      setPayMethod("upi_collect");
+      setUpiCollectId(""); setCollectStatus("idle");
+      setPaidPaymentId(""); setRazorpayOrderId(""); setOrderLoading(false);
+      openSheet();
+    } else {
+      closeSheet();
     }
   }, [visible]);
 
-  // ── Success step ────────────────────────────────────────────────────────────
+  // ─── Back handler ─────────────────────────────────────────────────────────
+
   useEffect(() => {
-    if (step !== "success") return;
-    successProg.setValue(0);
-    setCountdown(5);
-    setTimeout(() => successLottieRef.current?.play(), 80);
-    Animated.timing(successProg, {
-      toValue: 1, duration: 5000, easing: Easing.linear, useNativeDriver: false,
-    }).start();
-    const iv = setInterval(() => {
-      setCountdown((c) => { if (c <= 1) { clearInterval(iv); return 0; } return c - 1; });
-    }, 1000);
-    const t = setTimeout(createRental, 5000);
-    return () => { clearInterval(iv); clearTimeout(t); };
+    if (!visible) return;
+    const sub = BackHandler.addEventListener("hardwareBackPress", () => {
+      handleBack(); return true;
+    });
+    return () => sub.remove();
+  }, [visible, step]);
+
+  const handleBack = () => {
+    if (step === "success")    { closeSheet(onClose); return; }
+    if (step === "processing") { return; }  // block back during processing
+
+    if (step === "payment" || step === "review") {
+      Alert.alert(
+        "Cancel Booking?",
+        step === "payment"
+          ? "Going back will cancel the payment. Your booking won't be confirmed."
+          : "Your booking details will be lost.",
+        [
+          { text: "Stay", style: "cancel" },
+          {
+            text: "Go Back",
+            style: "destructive",
+            onPress: () => setStep(step === "payment" ? "review" : "details"),
+          },
+        ]
+      );
+      return;
+    }
+    closeSheet(onClose);
+  };
+
+  // Play success lottie when step becomes "success"
+  useEffect(() => {
+    if (step === "success") {
+      // Small delay so the sheet has finished animating in
+      const t = setTimeout(() => lottieRef.current?.play(), 300);
+      return () => clearTimeout(t);
+    }
   }, [step]);
 
-  // ── createRental — called from success step OR "Go now" button ──────────────
-  const confirmingRef = useRef(false);
-  const createRental = useCallback(async () => {
-    if (confirmingRef.current) return;
-    confirmingRef.current = true;
+  // ─── Computed ─────────────────────────────────────────────────────────────
 
-    // Switch plane text to "Confirming booking…" and keep animation running
-    setPlanePhase("confirming");
-    setTimeout(() => planeLottieRef.current?.play(), 80);
+  const pricePerHour       = equipment?.price ?? 0;
+  const totalServiceAmount = pricePerHour * hours;
+  const et                 = calcEndTime(startTime, hours);
+  const isoDate            = toISO(eventDate);
 
-    const pr      = payResultRef.current;
-    const contact = altContact.enabled && altContact.name ? altContact : CURRENT_USER;
+  // ─── Step 2 → Step 3: Show payment screen immediately, create order in background
+
+  const handleGoToPayment = async () => {
+    if (!equipment) return;
+    setError("");
+    setRazorpayOrderId(""); // clear any stale order
+    setStep("payment");     // navigate immediately — user sees the payment screen right away
+    setOrderLoading(true);
+    try {
+      const res = await apiService.createPaymentOrder(bookingFee);
+      // Handle all common backend response shapes for orderId
+      const orderId: string =
+        res?.data?.orderId  ??
+        res?.data?.order_id ??
+        res?.data?.id       ??
+        res?.orderId        ??
+        res?.order_id       ??
+        res?.id             ?? "";
+      if (!orderId) {
+        console.error("[Payment] createPaymentOrder full response:", JSON.stringify(res));
+        throw new Error("No order ID received. Check /payments/create-order endpoint.");
+      }
+      setRazorpayOrderId(orderId);
+    } catch (err: any) {
+      const msg = err?.response?.data?.message || err?.message || "Could not create payment order.";
+      setError(msg);
+      // Stay on payment screen so user sees the error and can go back or retry
+    } finally {
+      setOrderLoading(false);
+    }
+  };
+
+  // ─── Finish booking after a confirmed paymentId ──────────────────────────
+
+  const finaliseBooking = async (paymentId: string, signature = "") => {
+    if (!equipment) return;
+    setStep("processing");
+    setProcessLabel("Verifying payment…");
+    try {
+      if (signature) {
+        await apiService.verifyPayment({ orderId: razorpayOrderId, paymentId, signature });
+      }
+      setProcessLabel("Creating your booking…");
+      const rentalRes = await apiService.createRental({
+        equipmentId:     equipment.id,
+        startDate:       isoDate,
+        endDate:         isoDate,
+        razorpayOrderId,
+        paymentId,
+        paymentMethod:   payMethod,
+        eventType,
+        startTime,
+        endTime:         et,
+        guestCount:      guestCount ? parseInt(guestCount) : undefined,
+        specialRequests: specialRequests.trim() || undefined,
+        basePrice:       totalServiceAmount,
+        latitude:        26.9124,
+        longitude:       75.7873,
+      });
+      setPaidPaymentId(paymentId);
+      const bookingId = rentalRes?.rental?.id ?? rentalRes?.booking?.id ?? rentalRes?.id;
+      setStep("success");
+      onBooked({ bookingId, djName: equipment.name, hours, totalAmount: totalServiceAmount, bookingAmount: bookingFee, eventDate: isoDate, eventType, paymentId });
+    } catch (err: any) {
+      setError(err?.response?.data?.message || err?.message || "Booking creation failed.");
+      setStep("payment");
+    }
+  };
+
+  // ─── Step 3: Submit ───────────────────────────────────────────────────────
+
+  const handleSubmitPayment = async () => {
+    if (!equipment) return;
+    setError("");
+
+    // ── "Pay at Venue" — no online payment, just create booking ──────────
+    if (payMethod === "cash") {
+      setStep("processing");
+      setProcessLabel("Confirming your booking…");
+      try {
+        const rentalRes = await apiService.createRental({
+          equipmentId:     equipment.id,
+          startDate:       isoDate,
+          endDate:         isoDate,
+          paymentMethod:   "cash",
+          eventType,
+          startTime,
+          endTime:         et,
+          guestCount:      guestCount ? parseInt(guestCount) : undefined,
+          specialRequests: specialRequests.trim() || undefined,
+          basePrice:       totalServiceAmount,
+          latitude:        26.9124,
+          longitude:       75.7873,
+        });
+        setPaidPaymentId("CASH");
+        const bookingId = rentalRes?.rental?.id ?? rentalRes?.booking?.id ?? rentalRes?.id;
+        setStep("success");
+        onBooked({ bookingId, djName: equipment.name, hours, totalAmount: totalServiceAmount, bookingAmount: 0, eventDate: isoDate, eventType, paymentId: "CASH" });
+      } catch (err: any) {
+        setError(err?.response?.data?.message || err?.message || "Booking failed.");
+        setStep("payment");
+      }
+      return;
+    }
+
+    // ── UPI Collect — uses RazorpayCustomUI SDK (collect flow = no screen redirect)
+    //    The SDK sends a silent collect request to the user's VPA.
+    //    User opens their UPI app, approves, and the SDK resolves here.
+    if (!razorpayOrderId) {
+      setError("Payment order not ready. Please wait and try again."); return;
+    }
+    if (!upiCollectId.trim() || !upiCollectId.includes("@")) {
+      setError("Enter a valid UPI ID (e.g. name@upi)"); return;
+    }
+
+    setCollectStatus("waiting");
+    setStep("processing");
+    setProcessLabel("Sending collect request to your UPI app…");
 
     try {
-      const res = await apiService.createRental({
-        equipmentId:     eq.id,
-        startDate:       new Date().toISOString(),
-        endDate:         new Date(Date.now() + days * 86_400_000).toISOString(),
-        deliveryAddress: deliveryMethod === "delivery" ? address : eq.pickupAddress,
-        paymentId:       pr?.paymentId,
-        paymentMethod:   pr?.method,
-        razorpayOrderId: orderId,
+      // payViaUPICollect uses SDK.open() with flow=collect — no Razorpay screen opens.
+      // The user approves silently inside their own UPI app (GPay / PhonePe etc).
+      // SDK blocks here until approved / failed / timeout.
+      const result = await RazorpayCustomUI.payViaUPICollect({
+        orderId: razorpayOrderId,
+        amount:  bookingFee,        // service expects ₹ — SDK converts to paise internally
+        vpa:     upiCollectId.trim(),
+        contact: userContact,
+        email:   userEmail,
       });
 
-      // Brief moment so animation always feels meaningful
-      await new Promise((r) => setTimeout(r, 900));
+      if (result.dismissed) {
+        setCollectStatus("failed");
+        setError("Payment was cancelled. Try again.");
+        setStep("payment");
+        return;
+      }
+      if (!result.success) {
+        setCollectStatus("failed");
+        setError(result.error || "UPI payment failed. Check your UPI app and try again.");
+        setStep("payment");
+        return;
+      }
 
-      const r: RentalReceipt = {
-        rentalId:      res?.rental?.id ?? `RNT-${Date.now()}`,
-        equipmentName: eq.name,
-        days,
-        totalAmount:   grand,
-        paymentMethod: pr?.method ?? "cod",
-        paymentId:     pr?.paymentId,
-        deliveryMethod,
-        address:       deliveryMethod === "delivery" ? address : eq.pickupAddress,
-        contactName:   contact.name,
-        contactPhone:  contact.phone,
-        createdAt:     new Date().toISOString(),
-      };
+      // SDK returned success — verify and create booking
+      setCollectStatus("approved");
+      await finaliseBooking(result.paymentId!, result.signature ?? "");
 
-      setPlanePhase("idle");   // hide plane
-      setReceipt(r);
-      setStep("receipt");
-      onBooked?.(r); // silent — store receipt only; do NOT navigate in this callback
-    } catch (e: any) {
-      setPlanePhase("idle");
-      Alert.alert("Booking Failed", e.message ?? "Could not create booking.");
-    } finally {
-      confirmingRef.current = false;
+    } catch (err: any) {
+      setCollectStatus("failed");
+      setError(err?.response?.data?.message || err?.message || "UPI payment failed. Try again.");
+      setStep("payment");
     }
-  }, [altContact, deliveryMethod, address, eq, days, grand, orderId]);
+  };
 
-  // ── goToPayment ─────────────────────────────────────────────────────────────
-  const goToPayment = useCallback(async () => {
-    if (deliveryMethod === "delivery" && address.trim().length < 6) {
-      return Alert.alert("Missing Address", "Please enter or select a delivery address.");
-    }
+  if (!equipment) return null;
 
-    // 1. Show plane immediately
-    setPlanePhase("preparing");
-    setTimeout(() => planeLottieRef.current?.play(), 80);
+  // ─── Step dot progress ────────────────────────────────────────────────────
 
-    try {
-      // 2. Create order (plane plays during this)
-      const res = await apiService.createPaymentOrder(grand);
-      if (!res?.orderId) throw new Error("No order ID returned");
-      setOrderId(res.orderId);
+  const STEP_ORDER: Step[] = ["details", "review", "payment"];
+  const stepIdx = STEP_ORDER.indexOf(step);
 
-      // 3. Switch text and open payment screen ON TOP of the plane overlay
-      setPlanePhase("paying");
-      setShowPayment(true);
 
-    } catch (e: any) {
-      setPlanePhase("idle");
-      Alert.alert("Setup Failed", e.message ?? "Could not create payment order.");
-    }
-  }, [deliveryMethod, address, grand]);
-
-  // ── Payment result callback ─────────────────────────────────────────────────
-  const onPaymentResult = useCallback((result: PaymentResult) => {
-    // Close payment screen — plane overlay stays visible (phase = "paying")
-    setShowPayment(false);
-
-    if (result.success) {
-      setPayResult(result);
-      // Immediately start rental creation — plane continues with "confirming" text
-      payResultRef.current = result;
-      createRental();
-    } else if (result.dismissed) {
-      // User backed out — hide plane, let them retry
-      setPlanePhase("idle");
-    } else {
-      setPlanePhase("idle");
-      Alert.alert("Payment Failed", result.error ?? "Please try again.");
-    }
-  }, [createRental]);
-
-  const contactPerson   = altContact.enabled && altContact.name ? altContact : CURRENT_USER;
-  const progressWidth   = successProg.interpolate({ inputRange: [0, 1], outputRange: ["0%", "100%"] });
-  const scrollPadBottom = CTA_BAR_HEIGHT + bottomNavHeight + insets.bottom + 16;
-  const ctaBottom       = bottomNavHeight + insets.bottom;
-  const planeVisible    = planePhase !== "idle";
-
-  const renderBackdrop = useCallback(
-    (p: any) => (
-      <BottomSheetBackdrop
-        {...p}
-        disappearsOnIndex={-1}
-        appearsOnIndex={0}
-        opacity={0.6}
-        pressBehavior="close"
-      />
-    ),
-    []
-  );
+  // ─── Render ───────────────────────────────────────────────────────────────
 
   return (
-    <>
-      {/*
-        PaymentScreen opens INSIDE this modal so it sits on top of the plane overlay.
-        We do NOT hide the plane when payment opens — it continues playing behind
-        PaymentScreen and is immediately visible again when PaymentScreen closes.
-      */}
-      {showPayment && (
-        <Modal visible transparent animationType="slide" statusBarTranslucent>
-          <PaymentScreen
-            orderId={orderId}
-            amount={grand}
-            contact={contactPerson.phone}
-            email={contactPerson.email ?? "guest@basswala.in"}
-            accentColor={accent}
-            onBack={() => {
-              setShowPayment(false);
-              setPlanePhase("idle");
-            }}
-            onResult={onPaymentResult}
-          />
-        </Modal>
-      )}
-
-      <BottomSheet
-        index={sheetIndex}
-        snapPoints={snapPoints}
-        enablePanDownToClose
-        onClose={onClose}
-        backdropComponent={renderBackdrop}
-        backgroundStyle={s.sheetBg}
-        handleIndicatorStyle={[s.handle, { backgroundColor: accent + "70" }]}
-        keyboardBehavior="extend"
-        keyboardBlurBehavior="restore"
-        android_keyboardInputMode="adjustResize"
+    <Modal visible={visible} transparent animationType="none" statusBarTranslucent onRequestClose={handleBack}>
+      <KeyboardAvoidingView
+        style={StyleSheet.absoluteFill}
+        behavior={Platform.OS === "ios" ? "padding" : undefined}
+        pointerEvents="box-none"
       >
+        {/* Overlay */}
+        <Animated.View style={[s.overlay, { opacity: overlayOp }]}>
+          <TouchableOpacity
+            style={{ flex: 1 }} activeOpacity={1}
+            onPress={step !== "processing" ? handleBack : undefined}
+          />
+        </Animated.View>
 
-        {/* ══════ DELIVERY STEP ══════ */}
-        {step === "delivery" && (
-          <>
-            <Animated.View style={[s.header, { opacity: headerFade }]}>
-              <View style={s.headerLeft}>
-                <View style={[s.headerDot, { backgroundColor: accent }]} />
+        {/* Sheet */}
+        <Animated.View style={[s.sheet, { transform: [{ translateY }] }]}>
+
+          <View style={s.handleZone}><View style={s.handle} /></View>
+
+          {/* ─── Header ─── */}
+          <View style={s.header}>
+            {step !== "success" && step !== "processing" && (
+              <TouchableOpacity style={s.backBtn} onPress={handleBack} activeOpacity={0.8}>
+                <Ionicons name="arrow-back" size={20} color="#101720" />
+              </TouchableOpacity>
+            )}
+            <View style={{ flex: 1 }}>
+              <Text style={s.headerTitle}>
+                {step === "details"    ? "Book DJ"
+                : step === "review"    ? "Review Booking"
+                : step === "payment"   ? "Payment"
+                : step === "processing"? "Processing…"
+                :                        "Booking Confirmed! 🎉"}
+              </Text>
+              <Text style={s.headerSub} numberOfLines={1}>
+                {step === "details"    ? equipment.name
+                : step === "review"    ? "Confirm before paying"
+                : step === "payment"   ? `Pay ₹${bookingFee} · ${RAZORPAY_CONFIG.NAME}`
+                : step === "processing"? processLabel
+                :                        "Your event is all set!"}
+              </Text>
+            </View>
+            {stepIdx >= 0 && (
+              <View style={s.stepDots}>
+                {STEP_ORDER.map((_, i) => (
+                  <View key={i} style={[
+                    s.stepDot,
+                    i === stepIdx && s.stepDotActive,
+                    i < stepIdx  && s.stepDotDone,
+                  ]} />
+                ))}
+              </View>
+            )}
+          </View>
+
+          {/* ══════════════════════════════════════
+              STEP 1 — EVENT DETAILS
+          ══════════════════════════════════════ */}
+          {step === "details" && (
+            <ScrollView style={s.body} showsVerticalScrollIndicator={false}
+              keyboardShouldPersistTaps="handled" contentContainerStyle={{ paddingBottom: 40 }}>
+
+              {/* Price bar */}
+              <View style={s.priceSummary}>
                 <View>
-                  <Text style={s.headerTitle}>Book Equipment</Text>
-                  <Text style={s.headerSub}>{eq.name}</Text>
+                  <Text style={s.psLabel}>RATE</Text>
+                  <Text style={s.psValue}>₹{pricePerHour.toLocaleString()}<Text style={s.psUnit}>/hr</Text></Text>
                 </View>
-              </View>
-              <TouchableOpacity style={s.closeBtn} onPress={onClose}>
-                <Ionicons name="close" size={17} color="#64748b" />
-              </TouchableOpacity>
-            </Animated.View>
-
-            <Animated.View style={{ transform: [{ translateY: pillSlide }], opacity: headerFade }}>
-              <LinearGradient
-                colors={[accent + "18", accent + "08"]}
-                start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
-                style={[s.pill, { borderColor: accent + "40" }]}
-              >
-                <View style={[s.pillIconWrap, { backgroundColor: accent + "25" }]}>
-                  <Ionicons name="musical-notes-outline" size={20} color={accent} />
-                </View>
-                <View style={{ flex: 1 }}>
-                  <Text style={s.pillName} numberOfLines={1}>{eq.name}</Text>
-                  <Text style={s.pillMeta}>{days} day{days > 1 ? "s" : ""} · {eq.category}</Text>
-                </View>
-                <View style={s.pillAmtCol}>
-                  <Text style={[s.pillAmt, { color: accent }]}>₹{grand}</Text>
-                  <View style={[s.pillDepositTag, { backgroundColor: accent + "18" }]}>
-                    <Text style={[s.pillDepositText, { color: accent }]}>incl. deposit</Text>
-                  </View>
-                </View>
-              </LinearGradient>
-            </Animated.View>
-
-            <BottomSheetScrollView
-              keyboardShouldPersistTaps="handled"
-              showsVerticalScrollIndicator={false}
-              contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 8, paddingBottom: scrollPadBottom }}
-            >
-              {/* ── Delivery method ── */}
-              <SectionLabel icon="swap-horizontal-outline" title="Delivery Method" accent={accent} />
-              <View style={s.methodRow}>
-                {(["delivery", "pickup"] as DeliveryMethod[]).map((m) => {
-                  const active = deliveryMethod === m;
-                  return (
+                <View style={s.psDivider} />
+                <View style={s.hourSel}>
+                  <Text style={s.psLabel}>HOURS</Text>
+                  <View style={s.hourRow}>
                     <TouchableOpacity
-                      key={m} activeOpacity={0.85}
-                      style={[s.methodCard, active && { borderColor: accent, backgroundColor: accent + "0d" }]}
-                      onPress={() => setDeliveryMethod(m)}
-                    >
-                      {active && (
-                        <LinearGradient colors={[accent + "18", accent + "05"]} style={StyleSheet.absoluteFillObject} />
-                      )}
-                      <View style={[s.methodIconBox, active && { backgroundColor: accent + "28" }]}>
-                        <Ionicons
-                          name={m === "delivery" ? "bicycle-outline" : "storefront-outline"}
-                          size={24} color={active ? accent : "#94a3b8"}
-                        />
-                      </View>
-                      <Text style={[s.methodTitle, active && { color: accent }]}>
-                        {m === "delivery" ? "Home Delivery" : "Self Pickup"}
-                      </Text>
-                      <Text style={s.methodSub}>
-                        {m === "delivery" ? "Door-step delivery" : "Pickup from store"}
-                      </Text>
-                      {active && (
-                        <View style={[s.methodCheck, { backgroundColor: accent }]}>
-                          <Ionicons name="checkmark" size={10} color="#fff" />
-                        </View>
-                      )}
+                      style={[s.hourBtn, hours <= minHours && s.hourBtnOff]}
+                      onPress={() => setHours(h => Math.max(minHours, h - 1))}
+                      disabled={hours <= minHours} activeOpacity={0.8}>
+                      <Ionicons name="remove" size={16} color={hours <= minHours ? "#c4c9d0" : "#fff"} />
                     </TouchableOpacity>
-                  );
-                })}
+                    <Text style={s.hourNum}>{hours}</Text>
+                    <TouchableOpacity style={s.hourBtn} onPress={() => setHours(h => h + 1)} activeOpacity={0.8}>
+                      <Ionicons name="add" size={16} color="#fff" />
+                    </TouchableOpacity>
+                  </View>
+                </View>
+                <View style={s.psDivider} />
+                <View>
+                  <Text style={s.psLabel}>SERVICE TOTAL</Text>
+                  <Text style={[s.psValue, { color: "#0cadab" }]}>₹{totalServiceAmount.toLocaleString()}</Text>
+                </View>
               </View>
 
-              {deliveryMethod === "pickup" && (
-                <View style={[s.infoCard, { borderColor: accent + "35", backgroundColor: accent + "08" }]}>
-                  <View style={[s.infoIcon, { backgroundColor: accent + "22" }]}>
-                    <Ionicons name="location" size={17} color={accent} />
-                  </View>
-                  <View style={{ flex: 1 }}>
-                    <Text style={s.infoTitle}>Pickup Location</Text>
-                    <Text style={s.infoBody}>{eq.pickupAddress}</Text>
-                    <Text style={[s.infoHint, { color: accent }]}>Open 10 AM – 7 PM · Mon–Sat</Text>
-                  </View>
-                </View>
-              )}
-
-              {deliveryMethod === "delivery" && (
-                <>
-                  <SectionLabel icon="bookmark-outline" title="Saved Addresses" sub="Tap to select" accent={accent} />
-                  {SAVED_ADDRESSES.map((addr) => {
-                    const active = selectedAddrId === addr.id;
-                    return (
-                      <TouchableOpacity
-                        key={addr.id} activeOpacity={0.85}
-                        style={[s.addrCard, active && { borderColor: accent, backgroundColor: accent + "0a" }]}
-                        onPress={() => { setSelectedAddrId(addr.id); setAddress(addr.address); setPincode(addr.pincode); }}
-                      >
-                        <View style={[s.addrIcon, active && { backgroundColor: accent + "22", borderColor: accent + "40" }]}>
-                          <Ionicons name={addr.icon} size={16} color={active ? accent : "#94a3b8"} />
-                        </View>
-                        <View style={{ flex: 1 }}>
-                          <Text style={[s.addrLabel, active && { color: accent }]}>{addr.label}</Text>
-                          <Text style={s.addrText} numberOfLines={1}>{addr.address}</Text>
-                        </View>
-                        {active && <Ionicons name="checkmark-circle" size={22} color={accent} />}
-                      </TouchableOpacity>
-                    );
-                  })}
-
-                  <SectionLabel icon="create-outline" title="Or Enter Manually" accent={accent} />
-                  <Field
-                    label="Full Address" value={address}
-                    onChange={(v: string) => { setAddress(v); setSelectedAddrId(null); }}
-                    placeholder="House/Flat, Street, Area" icon="home-outline" accent={accent}
-                  />
-                  <View style={{ flexDirection: "row", gap: 10 }}>
-                    <View style={{ flex: 1 }}>
-                      <Field label="Landmark" value={landmark} onChange={setLandmark} placeholder="Near..." icon="navigate-outline" accent={accent} />
-                    </View>
-                    <View style={{ width: 118 }}>
-                      <Field label="Pincode" value={pincode} onChange={setPincode} placeholder="302019" icon="mail-outline" accent={accent} keyboardType="numeric" />
-                    </View>
-                  </View>
-                </>
-              )}
-
-              {/* ── Contact ── */}
-              <SectionLabel icon="person-circle-outline" title="Contact Person" sub="Who receives the gear?" accent={accent} />
-              <LinearGradient colors={[accent + "12", accent + "06"]} style={[s.userCard, { borderColor: accent + "35" }]}>
-                <View style={[s.avatar, { backgroundColor: accent }]}>
-                  <Text style={s.avatarText}>{CURRENT_USER.name.charAt(0)}</Text>
-                </View>
+              {/* Booking fee callout */}
+              <View style={s.feeCallout}>
+                <Ionicons name="wallet-outline" size={18} color="#0cadab" />
                 <View style={{ flex: 1 }}>
-                  <Text style={s.userName}>{CURRENT_USER.name}</Text>
-                  <Text style={s.userPhone}>{CURRENT_USER.phone}</Text>
+                  <Text style={s.feeCalloutTitle}>Booking Fee: ₹{bookingFee}</Text>
+                  <Text style={s.feeCalloutSub}>Pay online now to confirm your slot · DJ service charges settled separately</Text>
                 </View>
-                <View style={[s.youBadge, { borderColor: accent + "50", backgroundColor: accent + "15" }]}>
-                  <Ionicons name="checkmark-circle" size={12} color={accent} />
-                  <Text style={[s.youBadgeText, { color: accent }]}>You</Text>
-                </View>
-              </LinearGradient>
+              </View>
 
-              <TouchableOpacity
-                activeOpacity={0.85}
-                style={[s.altContactRow, altContact.enabled && s.altContactRowActive]}
-                onPress={() => setAltContact((c) => ({ ...c, enabled: !c.enabled }))}
-              >
-                <Ionicons name={altContact.enabled ? "person-remove-outline" : "person-add-outline"} size={17} color={altContact.enabled ? "#f87171" : accent} />
-                <Text style={[s.altContactText, { color: altContact.enabled ? "#f87171" : accent }]}>
-                  {altContact.enabled ? "Remove alternate contact" : "Add different contact"}
-                </Text>
-                <Ionicons name={altContact.enabled ? "chevron-up" : "chevron-down"} size={15} color="#94a3b8" />
+              {/* Event type chips */}
+              <Text style={s.fieldLabel}>Event Type</Text>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.chipRow}>
+                {EVENT_TYPES.map(t => (
+                  <TouchableOpacity key={t} style={[s.chip, eventType === t && s.chipOn]}
+                    onPress={() => setEventType(t)} activeOpacity={0.8}>
+                    <Text style={[s.chipText, eventType === t && s.chipTextOn]}>{t}</Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+
+              <Text style={s.fieldLabel}>Event Date</Text>
+              <View style={s.inputWrap}>
+                <Ionicons name="calendar-outline" size={18} color="#8696a0" style={s.inputIcon} />
+                <TextInput style={s.input} value={eventDate} onChangeText={setEventDate}
+                  placeholder="e.g. 15 Apr 2025" placeholderTextColor="#c4c9d0" />
+              </View>
+
+              <Text style={s.fieldLabel}>Start Time</Text>
+              <View style={s.inputWrap}>
+                <Ionicons name="time-outline" size={18} color="#8696a0" style={s.inputIcon} />
+                <TextInput style={s.input} value={startTime} onChangeText={setStartTime}
+                  placeholder="HH:MM" placeholderTextColor="#c4c9d0" keyboardType="numbers-and-punctuation" />
+              </View>
+              <Text style={s.fieldHint}>End: {et} · {hours} hr{hours > 1 ? "s" : ""}</Text>
+
+              <Text style={s.fieldLabel}>Expected Guests <Text style={s.optional}>(optional)</Text></Text>
+              <View style={s.inputWrap}>
+                <Ionicons name="people-outline" size={18} color="#8696a0" style={s.inputIcon} />
+                <TextInput style={s.input} value={guestCount} onChangeText={setGuestCount}
+                  placeholder="e.g. 100" placeholderTextColor="#c4c9d0" keyboardType="number-pad" />
+              </View>
+
+              <Text style={s.fieldLabel}>Special Requests <Text style={s.optional}>(optional)</Text></Text>
+              <View style={[s.inputWrap, { alignItems: "flex-start", paddingTop: 12 }]}>
+                <Ionicons name="chatbubble-outline" size={18} color="#8696a0" style={[s.inputIcon, { marginTop: 2 }]} />
+                <TextInput style={[s.input, { height: 76, textAlignVertical: "top" }]}
+                  value={specialRequests} onChangeText={setSpecialRequests}
+                  placeholder="Songs, setup needs…" placeholderTextColor="#c4c9d0" multiline />
+              </View>
+
+              <View style={s.infoNote}>
+                <Ionicons name="car-outline" size={16} color="#0cadab" />
+                <Text style={s.infoNoteText}>Our team handles all DJ equipment delivery and setup at your venue.</Text>
+              </View>
+
+              <TouchableOpacity style={s.ctaBtn}
+                onPress={() => { Keyboard.dismiss(); setStep("review"); }} activeOpacity={0.88}>
+                <Text style={s.ctaBtnText}>Continue to Review</Text>
+                <Ionicons name="arrow-forward" size={18} color="#fff" />
               </TouchableOpacity>
+            </ScrollView>
+          )}
 
-              {altContact.enabled && (
-                <View style={s.altContactCard}>
-                  <Text style={s.altContactHint}>This person will receive and sign for the equipment</Text>
-                  <Field label="Full Name *"      value={altContact.name}  onChange={(v: string) => setAltContact((c) => ({ ...c, name: v }))}                                  placeholder="Their name"      icon="person-outline"  accent={accent} />
-                  <Field label="Mobile *"         value={altContact.phone} onChange={(v: string) => setAltContact((c) => ({ ...c, phone: v.replace(/\D/g, "").slice(0, 10) }))} placeholder="10-digit mobile" icon="call-outline"    accent={accent} keyboardType="phone-pad" />
-                  <Field label="Email (optional)" value={altContact.email} onChange={(v: string) => setAltContact((c) => ({ ...c, email: v }))}                                  placeholder="their@email.com" icon="mail-outline"    accent={accent} keyboardType="email-address" />
-                </View>
-              )}
+          {/* ══════════════════════════════════════
+              STEP 2 — REVIEW
+          ══════════════════════════════════════ */}
+          {step === "review" && (
+            <ScrollView style={s.body} showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 40 }}>
 
-              {/* ── Price summary ── */}
-              <LinearGradient colors={["#0f172a", "#1e293b", "#0f172a"]} style={s.priceCard}>
-                <View style={s.priceCardHeader}>
-                  <Ionicons name="receipt-outline" size={14} color="rgba(255,255,255,0.4)" />
-                  <Text style={s.priceLabel}>ORDER SUMMARY</Text>
+              {/* DJ card */}
+              <View style={s.reviewDJCard}>
+                <View style={s.djAvatar}><Text style={s.djAvatarText}>{equipment.name?.[0] ?? "D"}</Text></View>
+                <View style={{ flex: 1 }}>
+                  <Text style={s.djName}>{equipment.name}</Text>
+                  <Text style={s.djCat}>{equipment.category}</Text>
                 </View>
-                <View style={s.priceDivider} />
+                <View>
+                  <Text style={s.djRate}>₹{pricePerHour.toLocaleString()}</Text>
+                  <Text style={s.djRateUnit}>/hr</Text>
+                </View>
+              </View>
+
+              {/* Details */}
+              <View style={s.detailCard}>
+                <Text style={s.detailCardTitle}>Booking Details</Text>
                 {[
-                  { k: "Rental",           note: `₹${eq.price} × ${days}d`, v: `₹${total}` },
-                  { k: "Security Deposit", note: "Refundable",               v: `₹${eq.deposit}` },
-                ].map((row, i) => (
-                  <View key={i} style={s.priceRow}>
-                    <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-                      <Text style={s.priceKey}>{row.k}</Text>
-                      <View style={s.priceNoteTag}><Text style={s.priceNote}>{row.note}</Text></View>
+                  { icon: "bookmark-outline",  label: "Event",    value: eventType },
+                  { icon: "calendar-outline",  label: "Date",     value: eventDate },
+                  { icon: "time-outline",      label: "Time",     value: `${startTime} – ${et}` },
+                  { icon: "hourglass-outline", label: "Duration", value: `${hours} hr${hours > 1 ? "s" : ""}` },
+                  ...(guestCount ? [{ icon: "people-outline",     label: "Guests",   value: guestCount }] : []),
+                  ...(specialRequests.trim() ? [{ icon: "chatbubble-outline", label: "Notes", value: specialRequests.trim() }] : []),
+                ].map((row, i, arr) => (
+                  <View key={row.label}>
+                    <View style={s.detailRow}>
+                      <View style={s.detailIconBox}>
+                        <Ionicons name={row.icon as any} size={14} color="#0cadab" />
+                      </View>
+                      <Text style={s.detailLabel}>{row.label}</Text>
+                      <Text style={s.detailValue} numberOfLines={2}>{row.value}</Text>
                     </View>
-                    <Text style={s.priceVal}>{row.v}</Text>
+                    {i < arr.length - 1 && <View style={s.divider} />}
                   </View>
                 ))}
-                <View style={s.priceDivider} />
+              </View>
+
+              {/* Service price (info only) */}
+              <LinearGradient colors={["#101720","#1e2d3d"]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }} style={s.priceCard}>
+                <Text style={s.priceCardLabel}>SERVICE FEE (Settled Offline with Team)</Text>
                 <View style={s.priceRow}>
-                  <Text style={[s.priceKey, { color: "#fff", fontWeight: "800", fontSize: 15 }]}>Grand Total</Text>
-                  <Text style={[s.priceVal, { color: accent, fontSize: 24, fontWeight: "900" }]}>₹{grand}</Text>
+                  <Text style={s.priceMeta}>₹{pricePerHour.toLocaleString()} × {hours} hrs</Text>
+                  <Text style={s.priceTotal}>₹{totalServiceAmount.toLocaleString()}</Text>
                 </View>
               </LinearGradient>
 
-              <View style={s.notice}>
-                <View style={[s.noticeIcon, { backgroundColor: accent + "18" }]}>
-                  <Ionicons name="information-circle" size={15} color={accent} />
+              {/* Pay now box */}
+              <View style={s.payNowBox}>
+                <View style={{ flex: 1 }}>
+                  <Text style={s.payNowTitle}>You Pay Now</Text>
+                  <Text style={s.payNowSub}>Booking confirmation fee · Refundable if cancelled 48h before</Text>
                 </View>
-                <Text style={s.noticeText}>
-                  {deliveryMethod === "delivery"
-                    ? "Free delivery within 10 km. Extra charges may apply beyond."
-                    : "No delivery charges for self-pickup. Carry a valid ID."}
-                </Text>
+                <Text style={s.payNowAmt}>₹{bookingFee}</Text>
               </View>
-            </BottomSheetScrollView>
 
-            {/* ── CTA ── */}
-            <View style={[s.ctaBar, { bottom: ctaBottom }]}>
+              {error ? (
+                <View style={s.errorCard}>
+                  <Ionicons name="alert-circle-outline" size={16} color="#dc2626" />
+                  <Text style={s.errorText}>{error}</Text>
+                </View>
+              ) : null}
+
               <TouchableOpacity
-                style={[s.ctaBtn, planePhase === "preparing" && { opacity: 0.6 }]}
-                onPress={goToPayment}
-                disabled={planePhase !== "idle"}
-                activeOpacity={0.88}
-              >
-                <LinearGradient
-                  colors={[accent, accent + "CC"]}
-                  start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }}
-                  style={s.ctaInner}
-                >
-                  <View style={{ flex: 1 }}>
-                    <Text style={s.ctaText}>Continue to Payment</Text>
-                    <Text style={s.ctaSubText}>Secured by Razorpay</Text>
-                  </View>
-                  <View style={s.ctaArrow}>
-                    <Ionicons name="arrow-forward" size={18} color={accent} />
-                  </View>
-                </LinearGradient>
+                style={[s.ctaBtn, { backgroundColor: "#0cadab" }]}
+                onPress={handleGoToPayment} activeOpacity={0.88}>
+                <Ionicons name="card-outline" size={20} color="#fff" />
+                <Text style={s.ctaBtnText}>Proceed to Pay ₹{bookingFee}</Text>
               </TouchableOpacity>
-              <View style={s.rzpRow}>
-                <Ionicons name="lock-closed" size={11} color="#94a3b8" />
-                <Text style={s.rzpNote}>256-bit SSL encryption</Text>
-              </View>
-            </View>
-          </>
-        )}
 
-        {/* ══════ SUCCESS STEP ══════ */}
-        {step === "success" && (
-          <View style={s.successOuter}>
-            <View style={s.lottieWrap}>
-              <LottieView
-                ref={successLottieRef}
-                source={require("../assets/animations/success.json")}
-                style={s.lottie}
-                autoPlay={false}
-                loop={false}
-              />
-            </View>
-            <Animated.View
-              style={[
-                s.successContent,
-                {
-                  opacity: successProg.interpolate({ inputRange: [0, 0.1], outputRange: [0, 1], extrapolate: "clamp" }),
-                  transform: [{ translateY: successProg.interpolate({ inputRange: [0, 0.1], outputRange: [20, 0], extrapolate: "clamp" }) }],
-                },
-              ]}
-            >
-              <Text style={s.successTitle}>Payment Successful!</Text>
-              <View style={s.successAmtRow}>
-                <Text style={s.successCurrency}>₹</Text>
-                <Text style={s.successAmt}>{grand.toLocaleString("en-IN")}</Text>
-              </View>
-              <View style={s.successBadge}>
-                <Ionicons name="shield-checkmark" size={13} color="#16a34a" />
-                <Text style={s.successBadgeText}>Paid via {PAY_LABEL[payResult?.method ?? "cod"]}</Text>
-              </View>
-              <Text style={s.successSub}>Confirming your booking…</Text>
-              <View style={s.progressTrack}>
-                <Animated.View style={[s.progressFill, { width: progressWidth }]} />
-              </View>
-              <View style={s.successFooterRow}>
-                <Text style={s.countdown}>Auto-continuing in {countdown}s</Text>
+              <Text style={s.termsNote}>Secured by Razorpay · {RAZORPAY_CONFIG.NAME}</Text>
+            </ScrollView>
+          )}
+
+          {/* ══════════════════════════════════════
+              STEP 3 — PAYMENT (Custom UI)
+          ══════════════════════════════════════ */}
+          {step === "payment" && (
+            <>
+              {/* Scrollable body */}
+              <ScrollView
+                style={s.body}
+                showsVerticalScrollIndicator={false}
+                keyboardShouldPersistTaps="handled"
+                contentContainerStyle={{ paddingBottom: 120 }}
+              >
+                {/* Amount + order status header */}
+                <View style={s.payAmountHeader}>
+                  <View style={s.razorpayBadge}>
+                    <Text style={s.razorpayBadgeText}>🔒 Secured by Razorpay</Text>
+                  </View>
+                  <Text style={s.payAmountBig}>₹{bookingFee}</Text>
+                  <Text style={s.payAmountSub}>Booking Confirmation Fee</Text>
+                  {/* Order status pill */}
+                  {orderLoading ? (
+                    <View style={s.orderLoadingRow}>
+                      <ActivityIndicator size="small" color="#0cadab" />
+                      <Text style={s.orderLoadingText}>Preparing your order…</Text>
+                    </View>
+                  ) : !razorpayOrderId && error ? (
+                    <TouchableOpacity style={s.retryOrderBtn} onPress={handleGoToPayment}>
+                      <Ionicons name="refresh-outline" size={13} color="#dc2626" />
+                      <Text style={s.retryOrderText}>Retry</Text>
+                    </TouchableOpacity>
+                  ) : razorpayOrderId ? (
+                    <View style={s.orderReadyRow}>
+                      <Ionicons name="checkmark-circle" size={13} color="#22c55e" />
+                      <Text style={s.orderReadyText}>Order ready</Text>
+                    </View>
+                  ) : null}
+                </View>
+
+                {/* ── When order loading: show skeleton, else show real UI ── */}
+                {orderLoading ? (
+                  <PaymentSkeleton />
+                ) : (
+                  <>
+                    {/* ── 2 payment method tabs — UPI Collect + Pay at Venue ── */}
+                    <View style={s.methodTabs}>
+                      {([
+                        { id: "upi_collect", label: "Pay via UPI",     icon: "phone-portrait-outline" },
+                        { id: "cash",        label: "Pay at Venue",    icon: "cash-outline" },
+                      ] as { id: PayMethod; label: string; icon: string }[]).map(m => (
+                        <TouchableOpacity key={m.id}
+                          style={[s.methodTab, payMethod === m.id && s.methodTabOn]}
+                          onPress={() => { setPayMethod(m.id); setError(""); }}
+                          activeOpacity={0.8}>
+                          <Ionicons name={m.icon as any} size={18} color={payMethod === m.id ? "#0cadab" : "#8696a0"} />
+                          <Text style={[s.methodTabText, payMethod === m.id && s.methodTabTextOn]}>{m.label}</Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+
+                    {/* ─── UPI Collect — backend API, no SDK redirect ─── */}
+                    {payMethod === "upi_collect" && (
+                      <View style={s.methodBody}>
+                        <Text style={s.methodTitle}>Pay via UPI</Text>
+                        <Text style={s.methodSub}>Enter your UPI ID — we'll send a collect request directly to your app</Text>
+
+                        <View style={[s.inputWrap, { marginHorizontal: 0, marginTop: 16 }]}>
+                          <Ionicons name="at-outline" size={18} color="#8696a0" style={s.inputIcon} />
+                          <TextInput
+                            style={s.input}
+                            value={upiCollectId}
+                            onChangeText={v => { setUpiCollectId(v); setError(""); }}
+                            placeholder="yourname@upi"
+                            placeholderTextColor="#c4c9d0"
+                            autoCapitalize="none"
+                            keyboardType="email-address"
+                          />
+                          {upiCollectId.includes("@") && (
+                            <Ionicons name="checkmark-circle" size={18} color="#22c55e" style={{ marginLeft: 6 }} />
+                          )}
+                        </View>
+
+                        {/* Supported apps */}
+                        <View style={s.upiExamples}>
+                          {["GPay","PhonePe","Paytm","BHIM"].map(a => (
+                            <View key={a} style={s.upiExampleChip}>
+                              <Text style={s.upiExampleText}>{a}</Text>
+                            </View>
+                          ))}
+                        </View>
+
+                        <View style={s.upiHowBox}>
+                          <Ionicons name="information-circle-outline" size={15} color="#0cadab" />
+                          <Text style={s.upiHowText}>
+                            After tapping Pay, open your UPI app and approve the ₹{bookingFee} collect request. You'll stay in this app throughout.
+                          </Text>
+                        </View>
+                      </View>
+                    )}
+
+                    {/* ─── Pay at Venue — no online payment ─── */}
+                    {payMethod === "cash" && (
+                      <View style={s.methodBody}>
+                        <Text style={s.methodTitle}>Pay at Venue</Text>
+                        <Text style={s.methodSub}>Confirm your slot now — pay the booking fee in cash at the event</Text>
+
+                        <View style={s.cashInfoCard}>
+                          <View style={s.cashInfoRow}>
+                            <View style={s.cashInfoIcon}><Ionicons name="checkmark" size={14} color="#16a34a" /></View>
+                            <Text style={s.cashInfoText}>Slot held for 24 hours after confirmation</Text>
+                          </View>
+                          <View style={s.cashInfoRow}>
+                            <View style={s.cashInfoIcon}><Ionicons name="checkmark" size={14} color="#16a34a" /></View>
+                            <Text style={s.cashInfoText}>Pay ₹{bookingFee} booking fee at the venue on event day</Text>
+                          </View>
+                          <View style={s.cashInfoRow}>
+                            <View style={s.cashInfoIcon}><Ionicons name="checkmark" size={14} color="#16a34a" /></View>
+                            <Text style={s.cashInfoText}>Full DJ service charges settled separately with our team</Text>
+                          </View>
+                        </View>
+
+                        <View style={s.cashWarning}>
+                          <Ionicons name="time-outline" size={14} color="#d97706" />
+                          <Text style={s.cashWarningText}>Cash bookings are subject to availability. Online payment guarantees your slot.</Text>
+                        </View>
+                      </View>
+                    )}
+
+                    {/* Error */}
+                    {!!error && (
+                      <View style={[s.errorCard, { marginHorizontal: 20 }]}>
+                        <Ionicons name="alert-circle-outline" size={16} color="#dc2626" />
+                        <Text style={s.errorText}>{error}</Text>
+                      </View>
+                    )}
+                  </>
+                )}
+              </ScrollView>
+
+              {/* ── Sticky Pay button ── */}
+              <View style={s.paymentStickyBar}>
                 <TouchableOpacity
-                  style={[s.skipBtn, { backgroundColor: accent }]}
-                  onPress={() => { successProg.stopAnimation(); createRental(); }}
-                  activeOpacity={0.85}
-                >
-                  <Text style={s.skipText}>Go now</Text>
-                  <Ionicons name="arrow-forward" size={13} color="#fff" />
+                  style={[s.paymentStickyBtn, (orderLoading || !razorpayOrderId) && { opacity: 0.4 }]}
+                  onPress={handleSubmitPayment}
+                  disabled={orderLoading || !razorpayOrderId}
+                  activeOpacity={0.88}>
+                  {orderLoading ? (
+                    <>
+                      <ActivityIndicator size="small" color="#fff" />
+                      <Text style={s.paymentStickyBtnText}>Preparing order…</Text>
+                    </>
+                  ) : (
+                    <>
+                      <Ionicons name="lock-closed-outline" size={18} color="#fff" />
+                      <Text style={s.paymentStickyBtnText}>{payMethod === "cash" ? "Confirm Booking" : `Pay ₹${bookingFee} via UPI`}</Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+                <Text style={s.termsNote}>256-bit SSL · Powered by Razorpay</Text>
+              </View>
+            </>
+          )}
+
+                    {/* ══════════════════════════════════════
+              STEP 4 — PROCESSING (fullscreen spinner)
+          ══════════════════════════════════════ */}
+          {step === "processing" && (
+            <View style={s.processingScreen}>
+              <LinearGradient colors={["#f0fafa","#e6f7f7"]} style={s.processingCircle}>
+                <ActivityIndicator size="large" color="#0cadab" />
+              </LinearGradient>
+              <Text style={s.processingTitle}>
+                {collectStatus === "waiting"
+                  ? "Waiting for UPI Approval"
+                  : processLabel || "Processing…"}
+              </Text>
+              {collectStatus === "waiting" ? (
+                <>
+                  <Text style={s.processingSub}>Open your UPI app and approve</Text>
+                  <Text style={s.processingSub}>the ₹{bookingFee} collect request</Text>
+                  <View style={s.upiWaitingApps}>
+                    {["GPay","PhonePe","Paytm","BHIM"].map(a => (
+                      <View key={a} style={s.upiWaitingChip}>
+                        <Text style={s.upiWaitingChipText}>{a}</Text>
+                      </View>
+                    ))}
+                  </View>
+                  <Text style={s.processingSub}>Checking every few seconds…</Text>
+                </>
+              ) : (
+                <Text style={s.processingSub}>Please wait · Do not close the app</Text>
+              )}
+            </View>
+          )}
+
+          {/* ══════════════════════════════════════
+              STEP 5 — SUCCESS
+          ══════════════════════════════════════ */}
+          {step === "success" && (
+            <>
+              {/* Scrollable receipt content */}
+              <ScrollView
+                style={s.body}
+                showsVerticalScrollIndicator={false}
+                contentContainerStyle={s.successContent}
+              >
+                <LottieView
+                  ref={lottieRef}
+                  source={require("../assets/animations/success.json")}
+                  autoPlay={false}
+                  loop={false}
+                  style={s.successLottie}
+                />
+
+                <Text style={s.successTitle}>Booking Confirmed!</Text>
+                <Text style={s.successSub}>
+                  {equipment.name} has been notified. Our team will confirm the final details shortly.
+                </Text>
+
+                <View style={s.successPayPill}>
+                  <Ionicons name="checkmark-circle" size={16} color="#16a34a" />
+                  <Text style={s.successPayPillText}>
+                    {paidPaymentId === "CASH" ? "Cash booking confirmed" : `₹${bookingFee} paid · ${paidPaymentId.slice(-10) || "—"}`}
+                  </Text>
+                </View>
+
+                <View style={s.successCard}>
+                  {[
+                    { label: "DJ",          value: equipment.name },
+                    { label: "Event",       value: eventType },
+                    { label: "Date",        value: eventDate },
+                    { label: "Time",        value: `${startTime} – ${et}` },
+                    { label: "Duration",    value: `${hours} hr${hours > 1 ? "s" : ""}` },
+                    { label: "Service Fee", value: `₹${totalServiceAmount.toLocaleString()} (offline)` },
+                    { label: "Paid Now", value: paidPaymentId === "CASH" ? "Pay at Venue" : `₹${bookingFee}`, highlight: true },
+                  ].map((row, i, arr) => (
+                    <View key={row.label}>
+                      <View style={s.successRow}>
+                        <Text style={s.successRowLabel}>{row.label}</Text>
+                        <Text style={[s.successRowValue, (row as any).highlight && s.successHighlight]}>
+                          {row.value}
+                        </Text>
+                      </View>
+                      {i < arr.length - 1 && <View style={s.divider} />}
+                    </View>
+                  ))}
+                </View>
+
+                <TouchableOpacity style={s.secondaryBtn} onPress={() => closeSheet(onClose)} activeOpacity={0.8}>
+                  <Text style={s.secondaryBtnText}>Back to Explore</Text>
+                </TouchableOpacity>
+
+                {/* Space so content not hidden under sticky bar */}
+                <View style={{ height: 96 }} />
+              </ScrollView>
+
+              {/* ── Sticky "View My Bookings" button ── */}
+              <View style={s.successStickyBar}>
+                <TouchableOpacity
+                  style={s.successStickyBtn}
+                  onPress={() => closeSheet(() => { onClose(); onViewBookings(); })}
+                  activeOpacity={0.88}>
+                  <Ionicons name="list-outline" size={20} color="#fff" />
+                  <Text style={s.successStickyBtnText}>View My Bookings</Text>
                 </TouchableOpacity>
               </View>
-            </Animated.View>
-          </View>
-        )}
+            </>
+          )}
 
-        {/* ══════ RECEIPT STEP ══════ */}
-        {step === "receipt" && receipt && (
-          <>
-            <LinearGradient colors={["#ffffff", "#ffffff"]} style={s.receiptHeader}>
-              <View style={[s.receiptHeaderIcon, { backgroundColor: accent + "30" }]}>
-                <Ionicons name="checkmark-done-outline" size={22} color={accent} />
-              </View>
-              <View style={{ flex: 1 }}>
-                <Text style={s.receiptTitle}>Booking Confirmed 🎉</Text>
-                <Text style={s.receiptOrderId}>{receipt.rentalId}</Text>
-              </View>
-              <TouchableOpacity style={s.receiptClose} onPress={onClose}>
-                <Ionicons name="close" size={17} color="rgba(255,255,255,0.55)" />
-              </TouchableOpacity>
-            </LinearGradient>
-
-            <BottomSheetScrollView
-              showsVerticalScrollIndicator={false}
-              contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: scrollPadBottom }}
-            >
-              <View style={s.amtBlock}>
-                <Text style={s.amtLabel}>TOTAL PAID</Text>
-                <Text style={s.amtVal}>₹{receipt.totalAmount.toLocaleString("en-IN")}</Text>
-                <View style={s.paidBadge}>
-                  <Ionicons name="checkmark-circle" size={13} color="#16a34a" />
-                  <Text style={s.paidBadgeText}>{receipt.paymentMethod === "cod" ? "Pay on Delivery" : "Payment Confirmed"}</Text>
-                </View>
-              </View>
-
-              <ReceiptSection title="Equipment">
-                <ReceiptRow icon="musical-notes-outline" label="Item"     value={receipt.equipmentName}                                        accent={accent} />
-                <ReceiptDivider />
-                <ReceiptRow icon="calendar-outline"      label="Duration" value={`${receipt.days} day${receipt.days > 1 ? "s" : ""}`}         accent={accent} />
-              </ReceiptSection>
-              <ReceiptSection title="Payment">
-                <ReceiptRow icon="card-outline" label="Method" value={PAY_LABEL[receipt.paymentMethod] ?? receipt.paymentMethod} accent={accent} />
-                {receipt.paymentId && (
-                  <><ReceiptDivider />
-                  <ReceiptRow icon="receipt-outline" label="Payment ID" value={receipt.paymentId} accent={accent} small /></>
-                )}
-                <ReceiptDivider />
-                <ReceiptRow icon="time-outline" label="Date" accent={accent}
-                  value={new Date(receipt.createdAt).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" })}
-                />
-              </ReceiptSection>
-              <ReceiptSection title="Delivery">
-                <ReceiptRow icon={receipt.deliveryMethod === "delivery" ? "bicycle-outline" : "storefront-outline"} label="Type" value={receipt.deliveryMethod === "delivery" ? "Home Delivery" : "Self Pickup"} accent={accent} />
-                <ReceiptDivider />
-                <ReceiptRow icon="location-outline" label="Address" value={receipt.address} accent={accent} />
-              </ReceiptSection>
-              <ReceiptSection title="Contact">
-                <ReceiptRow icon="person-outline" label="Name"  value={receipt.contactName}  accent={accent} />
-                <ReceiptDivider />
-                <ReceiptRow icon="call-outline"   label="Phone" value={receipt.contactPhone} accent={accent} />
-              </ReceiptSection>
-
-              <View style={[s.rzpCard, { borderColor: accent + "30" }]}>
-                <Ionicons name="shield-checkmark" size={14} color={accent} />
-                <Text style={[s.rzpCardText, { color: accent }]}>Secured by Razorpay · 256-bit SSL</Text>
-              </View>
-            </BottomSheetScrollView>
-
-            <View style={[s.ctaBar, { bottom: ctaBottom }]}>
-              {/* "View My Bookings" — navigates via onViewBookings; parent decides where to go */}
-              <TouchableOpacity
-                style={s.ctaBtn}
-                onPress={() => { onViewBookings?.(receipt!); onClose(); }}
-                activeOpacity={0.88}
-              >
-                <LinearGradient colors={["#0f172a", "#1e293b"]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }} style={s.ctaInner}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={s.ctaText}>View My Bookings</Text>
-                    <Text style={s.ctaSubText}>Track your rental</Text>
-                  </View>
-                  <View style={[s.ctaArrow, { backgroundColor: accent }]}>
-                    <Ionicons name="arrow-forward" size={18} color="#101720" />
-                  </View>
-                </LinearGradient>
-              </TouchableOpacity>
-              {/* "Done" — just closes the sheet, stays on current screen */}
-              <TouchableOpacity style={s.doneBtn} onPress={onClose} activeOpacity={0.7}>
-                <Text style={s.doneBtnText}>Done</Text>
-              </TouchableOpacity>
-            </View>
-          </>
-        )}
-
-        {/* ══════ PLANE ANIMATION OVERLAY ══════
-            Lives INSIDE the BottomSheet so it covers just the sheet content.
-            z-index 50 ensures it floats above every step.
-            PaymentScreen Modal renders on top of this (Modal is portal-based).
-        */}
-        {planeVisible && (
-          <View style={s.planeOverlay}>
-            <LottieView
-              ref={planeLottieRef}
-              source={require("../assets/animations/planeAnimation.json")}
-              style={s.planeLottie}
-              autoPlay
-              loop
-            />
-            <Text style={s.planeTitle}>{PLANE_TEXT[planePhase].title}</Text>
-            <Text style={s.planeSub}>{PLANE_TEXT[planePhase].sub}</Text>
-            <View style={[s.planeAmtPill, { borderColor: accent + "50", backgroundColor: accent + "10" }]}>
-              <Ionicons name="lock-closed" size={12} color={accent} />
-              <Text style={[s.planeAmt, { color: accent }]}>₹{grand.toLocaleString("en-IN")} · Secured</Text>
-            </View>
-          </View>
-        )}
-
-      </BottomSheet>
-    </>
+        </Animated.View>
+      </KeyboardAvoidingView>
+    </Modal>
   );
 }
 
-// ─── Sub-components ────────────────────────────────────────────────────────────
+// ─── Styles ───────────────────────────────────────────────────────────────────
 
-function SectionLabel({ icon, title, sub, accent }: { icon: string; title: string; sub?: string; accent: string }) {
-  return (
-    <View style={s.sLabel}>
-      <View style={[s.sLabelIcon, { backgroundColor: accent + "1a", borderColor: accent + "30" }]}>
-        <Ionicons name={icon as any} size={15} color={accent} />
-      </View>
-      <View>
-        <Text style={s.sLabelTitle}>{title}</Text>
-        {sub && <Text style={s.sLabelSub}>{sub}</Text>}
-      </View>
-    </View>
-  );
-}
+const SHEET_H = height * 0.93;
 
-function Field({ label, value, onChange, placeholder, keyboardType, icon, accent }: any) {
-  const [focused, setFocused] = useState(false);
-  return (
-    <View style={s.field}>
-      <Text style={s.fieldLabel}>{label}</Text>
-      <View style={[s.fieldBox, focused && { borderColor: accent, borderWidth: 1.5 }]}>
-        {icon && <Ionicons name={icon} size={15} color={focused ? accent : "#94a3b8"} />}
-        <TextInput
-          style={s.fieldInput} value={value} onChangeText={onChange}
-          placeholder={placeholder} placeholderTextColor="#c4c9d0"
-          keyboardType={keyboardType ?? "default"}
-          onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
-        />
-      </View>
-    </View>
-  );
-}
-
-function ReceiptSection({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <View style={s.rSection}>
-      <Text style={s.rSectionTitle}>{title.toUpperCase()}</Text>
-      <View style={s.rCard}>{children}</View>
-    </View>
-  );
-}
-
-function ReceiptRow({ icon, label, value, accent, small }: { icon: string; label: string; value: string; accent: string; small?: boolean }) {
-  return (
-    <View style={s.rRow}>
-      <View style={[s.rRowIcon, { backgroundColor: accent + "14", borderColor: accent + "28" }]}>
-        <Ionicons name={icon as any} size={14} color={accent} />
-      </View>
-      <Text style={s.rRowLabel}>{label}</Text>
-      <Text style={[s.rRowVal, small && { fontSize: 11 }]} numberOfLines={2}>{value}</Text>
-    </View>
-  );
-}
-
-function ReceiptDivider() { return <View style={s.rDivider} />; }
-
-// ─── Styles ────────────────────────────────────────────────────────────────────
 const s = StyleSheet.create({
-  sheetBg: {
-    backgroundColor: "#f8fafc", borderTopLeftRadius: 28, borderTopRightRadius: 28,
-    ...Platform.select({ ios: { shadowColor: "#000", shadowOffset: { width: 0, height: -4 }, shadowOpacity: 0.08, shadowRadius: 16 } }),
-  },
-  handle: { width: 38, height: 4, borderRadius: 2 },
+  overlay:              { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(16,23,32,0.5)" },
+  sheet:                { position: "absolute", bottom: 0, left: 0, right: 0, height: SHEET_H, backgroundColor: "#fff", borderTopLeftRadius: 28, borderTopRightRadius: 28, borderWidth: 1, borderBottomWidth: 0, borderColor: "#eef0f3", overflow: "hidden" },
+  handleZone:           { paddingTop: 12, paddingBottom: 4, alignItems: "center" },
+  handle:               { width: 44, height: 4, borderRadius: 2, backgroundColor: "#d1d5db" },
 
-  header:      { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 20, paddingVertical: 16, borderBottomWidth: 1, borderBottomColor: "#e8edf2" },
-  headerLeft:  { flexDirection: "row", alignItems: "center", gap: 10 },
-  headerDot:   { width: 8, height: 8, borderRadius: 4 },
-  headerTitle: { fontSize: 17, fontWeight: "800", color: "#0f172a", letterSpacing: -0.5 },
-  headerSub:   { fontSize: 12, color: "#94a3b8", fontWeight: "500", marginTop: 1 },
-  closeBtn:    { width: 34, height: 34, borderRadius: 10, backgroundColor: "#f1f5f9", justifyContent: "center", alignItems: "center" },
+  // Header
+  header:               { flexDirection: "row", alignItems: "center", paddingHorizontal: 20, paddingBottom: 14, gap: 10, borderBottomWidth: 1, borderBottomColor: "#f3f4f6" },
+  backBtn:              { width: 36, height: 36, borderRadius: 12, backgroundColor: "#f4f8ff", justifyContent: "center", alignItems: "center", borderWidth: 1, borderColor: "#eef0f3" },
+  headerTitle:          { fontSize: 18, fontWeight: "800", color: "#101720", letterSpacing: -0.3 },
+  headerSub:            { fontSize: 12, color: "#8696a0", fontWeight: "500", marginTop: 2 },
+  stepDots:             { flexDirection: "row", gap: 5 },
+  stepDot:              { width: 8, height: 8, borderRadius: 4, backgroundColor: "#e5e7eb" },
+  stepDotActive:        { backgroundColor: "#101720", width: 22 },
+  stepDotDone:          { backgroundColor: "#22c55e" },
 
-  pill:            { flexDirection: "row", alignItems: "center", gap: 12, marginHorizontal: 16, marginVertical: 10, borderRadius: 18, padding: 14, borderWidth: 1.5 },
-  pillIconWrap:    { width: 42, height: 42, borderRadius: 13, justifyContent: "center", alignItems: "center" },
-  pillName:        { fontSize: 14, fontWeight: "800", color: "#0f172a", letterSpacing: -0.3 },
-  pillMeta:        { fontSize: 11, color: "#94a3b8", fontWeight: "500", marginTop: 2 },
-  pillAmtCol:      { alignItems: "flex-end", gap: 4 },
-  pillAmt:         { fontSize: 22, fontWeight: "900", letterSpacing: -0.5 },
-  pillDepositTag:  { paddingHorizontal: 7, paddingVertical: 2, borderRadius: 6 },
-  pillDepositText: { fontSize: 9, fontWeight: "700", letterSpacing: 0.2 },
+  body:                 { flex: 1 },
 
-  sLabel:      { flexDirection: "row", alignItems: "center", gap: 10, marginTop: 22, marginBottom: 12 },
-  sLabelIcon:  { width: 30, height: 30, borderRadius: 9, justifyContent: "center", alignItems: "center", borderWidth: 1 },
-  sLabelTitle: { fontSize: 13, fontWeight: "800", color: "#0f172a", letterSpacing: -0.2 },
-  sLabelSub:   { fontSize: 11, color: "#94a3b8", fontWeight: "500", marginTop: 1 },
+  // Price summary bar
+  priceSummary:         { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginHorizontal: 20, marginTop: 18, marginBottom: 16, backgroundColor: "#f4f8ff", borderRadius: 20, padding: 16, borderWidth: 1, borderColor: "#eef0f3" },
+  psLabel:              { fontSize: 9, fontWeight: "700", color: "#8696a0", letterSpacing: 0.8, marginBottom: 5 },
+  psValue:              { fontSize: 20, fontWeight: "800", color: "#101720", letterSpacing: -0.5 },
+  psUnit:               { fontSize: 11, color: "#8696a0", fontWeight: "500" },
+  psDivider:            { width: 1, height: 40, backgroundColor: "#e5e7eb" },
+  hourSel:              { alignItems: "center" },
+  hourRow:              { flexDirection: "row", alignItems: "center", gap: 10, marginTop: 4 },
+  hourBtn:              { width: 30, height: 30, borderRadius: 10, backgroundColor: "#101720", justifyContent: "center", alignItems: "center" },
+  hourBtnOff:           { backgroundColor: "#e5e7eb" },
+  hourNum:              { fontSize: 18, fontWeight: "800", color: "#101720", minWidth: 22, textAlign: "center" },
 
-  methodRow:    { flexDirection: "row", gap: 10, marginBottom: 8 },
-  methodCard:   { flex: 1, alignItems: "center", backgroundColor: "#fff", borderRadius: 18, padding: 16, borderWidth: 1.5, borderColor: "#e8edf2", gap: 6, position: "relative", overflow: "hidden" },
-  methodIconBox:{ width: 48, height: 48, borderRadius: 15, backgroundColor: "#f1f5f9", justifyContent: "center", alignItems: "center" },
-  methodTitle:  { fontSize: 13, fontWeight: "800", color: "#0f172a", textAlign: "center" },
-  methodSub:    { fontSize: 11, color: "#94a3b8", fontWeight: "500", textAlign: "center", lineHeight: 15 },
-  methodCheck:  { position: "absolute", top: 10, right: 10, width: 18, height: 18, borderRadius: 9, justifyContent: "center", alignItems: "center" },
+  // Fee callout
+  feeCallout:           { flexDirection: "row", alignItems: "flex-start", gap: 10, marginHorizontal: 20, marginBottom: 18, backgroundColor: "#f0fafa", borderRadius: 16, padding: 14, borderWidth: 1.5, borderColor: "#0cadab" },
+  feeCalloutTitle:      { fontSize: 13, fontWeight: "700", color: "#101720", marginBottom: 2 },
+  feeCalloutSub:        { fontSize: 11, color: "#6b7280", lineHeight: 16, fontWeight: "500" },
 
-  infoCard:  { flexDirection: "row", alignItems: "flex-start", gap: 12, borderRadius: 16, padding: 14, borderWidth: 1.5, marginBottom: 4 },
-  infoIcon:  { width: 36, height: 36, borderRadius: 11, justifyContent: "center", alignItems: "center" },
-  infoTitle: { fontSize: 13, fontWeight: "800", color: "#0f172a", marginBottom: 3 },
-  infoBody:  { fontSize: 12, color: "#475569", fontWeight: "500" },
-  infoHint:  { fontSize: 11, fontWeight: "700", marginTop: 4 },
+  // Fields
+  fieldLabel:           { fontSize: 11, fontWeight: "700", color: "#6b7280", marginHorizontal: 20, marginBottom: 8, marginTop: 16, textTransform: "uppercase", letterSpacing: 0.5 },
+  optional:             { fontSize: 10, color: "#9ca3af", fontWeight: "400", textTransform: "none" },
+  inputWrap:            { flexDirection: "row", alignItems: "center", marginHorizontal: 20, backgroundColor: "#f9fafb", borderRadius: 14, paddingHorizontal: 14, borderWidth: 1.5, borderColor: "#e5e7eb" },
+  inputIcon:            { marginRight: 10 },
+  input:                { flex: 1, fontSize: 15, color: "#101720", paddingVertical: 13 },
+  fieldHint:            { fontSize: 11, color: "#0cadab", fontWeight: "600", marginHorizontal: 20, marginTop: 6 },
+  chipRow:              { paddingHorizontal: 20, gap: 8 },
+  chip:                 { paddingHorizontal: 16, paddingVertical: 9, borderRadius: 20, backgroundColor: "#f4f8ff", borderWidth: 1.5, borderColor: "#e5e7eb" },
+  chipOn:               { backgroundColor: "#101720", borderColor: "#101720" },
+  chipText:             { fontSize: 13, fontWeight: "600", color: "#374151" },
+  chipTextOn:           { color: "#fff" },
+  infoNote:             { flexDirection: "row", gap: 10, alignItems: "flex-start", marginHorizontal: 20, marginTop: 16, backgroundColor: "#f0fafa", borderRadius: 14, padding: 14, borderWidth: 1, borderColor: "#d0f0ef" },
+  infoNoteText:         { flex: 1, fontSize: 12, color: "#374151", lineHeight: 18, fontWeight: "500" },
+  ctaBtn:               { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, backgroundColor: "#101720", borderRadius: 18, paddingVertical: 17, marginHorizontal: 20, marginTop: 20 },
+  ctaBtnText:           { fontSize: 16, fontWeight: "800", color: "#fff" },
 
-  addrCard:  { flexDirection: "row", alignItems: "center", gap: 12, backgroundColor: "#fff", borderRadius: 14, padding: 13, marginBottom: 8, borderWidth: 1.5, borderColor: "#e8edf2" },
-  addrIcon:  { width: 36, height: 36, borderRadius: 11, backgroundColor: "#f1f5f9", justifyContent: "center", alignItems: "center", borderWidth: 1, borderColor: "#e8edf2" },
-  addrLabel: { fontSize: 13, fontWeight: "800", color: "#0f172a", marginBottom: 2 },
-  addrText:  { fontSize: 11, color: "#94a3b8", fontWeight: "500" },
+  // Review
+  reviewDJCard:         { flexDirection: "row", alignItems: "center", gap: 12, marginHorizontal: 20, marginTop: 18, marginBottom: 14, backgroundColor: "#f9fafb", borderRadius: 18, padding: 14, borderWidth: 1, borderColor: "#eef0f3" },
+  djAvatar:             { width: 52, height: 52, borderRadius: 16, backgroundColor: "#101720", justifyContent: "center", alignItems: "center" },
+  djAvatarText:         { color: "#fff", fontWeight: "800", fontSize: 22 },
+  djName:               { fontSize: 16, fontWeight: "800", color: "#101720", marginBottom: 3 },
+  djCat:                { fontSize: 12, color: "#8696a0", fontWeight: "500" },
+  djRate:               { fontSize: 18, fontWeight: "800", color: "#0cadab", textAlign: "right" },
+  djRateUnit:           { fontSize: 11, color: "#8696a0", textAlign: "right" },
+  detailCard:           { marginHorizontal: 20, backgroundColor: "#f9fafb", borderRadius: 18, padding: 16, borderWidth: 1, borderColor: "#eef0f3", marginBottom: 14 },
+  detailCardTitle:      { fontSize: 10, fontWeight: "700", color: "#9ca3af", letterSpacing: 0.9, textTransform: "uppercase", marginBottom: 14 },
+  detailRow:            { flexDirection: "row", alignItems: "center", gap: 10 },
+  detailIconBox:        { width: 28, height: 28, borderRadius: 9, backgroundColor: "#fff", justifyContent: "center", alignItems: "center", borderWidth: 1, borderColor: "#eef0f3" },
+  detailLabel:          { fontSize: 13, color: "#8696a0", fontWeight: "600", flex: 1 },
+  detailValue:          { fontSize: 13, fontWeight: "700", color: "#101720", textAlign: "right", maxWidth: width * 0.44 },
+  divider:              { height: 1, backgroundColor: "#f3f4f6", marginVertical: 9 },
+  priceCard:            { marginHorizontal: 20, borderRadius: 18, padding: 16, marginBottom: 12 },
+  priceCardLabel:       { fontSize: 9, fontWeight: "700", color: "rgba(255,255,255,0.5)", letterSpacing: 1, marginBottom: 10 },
+  priceRow:             { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
+  priceMeta:            { fontSize: 13, color: "rgba(255,255,255,0.65)", fontWeight: "600" },
+  priceTotal:           { fontSize: 18, fontWeight: "800", color: "#fff" },
+  payNowBox:            { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginHorizontal: 20, marginBottom: 16, backgroundColor: "#fffbeb", borderRadius: 16, padding: 16, borderWidth: 1.5, borderColor: "#fbbf24" },
+  payNowTitle:          { fontSize: 15, fontWeight: "800", color: "#101720", marginBottom: 3 },
+  payNowSub:            { fontSize: 11, color: "#6b7280", lineHeight: 16 },
+  payNowAmt:            { fontSize: 28, fontWeight: "800", color: "#0cadab", letterSpacing: -1 },
+  termsNote:            { fontSize: 11, color: "#9ca3af", textAlign: "center", marginHorizontal: 20, marginTop: 12, lineHeight: 16 },
+  errorCard:            { flexDirection: "row", gap: 8, alignItems: "flex-start", marginBottom: 10, backgroundColor: "#fef2f2", borderRadius: 12, padding: 12, borderWidth: 1, borderColor: "#fecaca" },
+  errorText:            { flex: 1, fontSize: 13, color: "#dc2626", fontWeight: "600" },
 
-  field:      { marginBottom: 10 },
-  fieldLabel: { fontSize: 10, fontWeight: "700", color: "#94a3b8", letterSpacing: 0.5, marginBottom: 6, textTransform: "uppercase" },
-  fieldBox:   { flexDirection: "row", alignItems: "center", gap: 10, backgroundColor: "#fff", borderRadius: 13, paddingHorizontal: 13, paddingVertical: 12, borderWidth: 1, borderColor: "#e8edf2" },
-  fieldInput: { flex: 1, fontSize: 14, color: "#0f172a", fontWeight: "500" },
+  // Payment step
+  payAmountHeader:      { alignItems: "center", paddingTop: 18, paddingBottom: 14, borderBottomWidth: 1, borderBottomColor: "#f3f4f6", marginBottom: 4 },
+  razorpayBadge:        { backgroundColor: "#f0fafa", borderRadius: 20, paddingHorizontal: 12, paddingVertical: 5, marginBottom: 10, borderWidth: 1, borderColor: "#d0f0ef" },
+  razorpayBadgeText:    { fontSize: 11, fontWeight: "700", color: "#0cadab" },
+  payAmountBig:         { fontSize: 48, fontWeight: "800", color: "#101720", letterSpacing: -2 },
+  orderLoadingRow:      { flexDirection: "row", alignItems: "center", gap: 7, marginTop: 10, backgroundColor: "#f0fafa", borderRadius: 20, paddingHorizontal: 14, paddingVertical: 6, borderWidth: 1, borderColor: "#d0f0ef" },
+  orderLoadingText:     { fontSize: 12, color: "#0cadab", fontWeight: "600" },
+  orderReadyRow:        { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 10, backgroundColor: "#f0fdf4", borderRadius: 20, paddingHorizontal: 14, paddingVertical: 6, borderWidth: 1, borderColor: "#bbf7d0" },
+  orderReadyText:       { fontSize: 12, color: "#16a34a", fontWeight: "600" },
+  retryOrderBtn:        { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 10, backgroundColor: "#fef2f2", borderRadius: 20, paddingHorizontal: 14, paddingVertical: 6, borderWidth: 1, borderColor: "#fecaca" },
+  retryOrderText:       { fontSize: 12, color: "#dc2626", fontWeight: "700" },
+  payAmountSub:         { fontSize: 13, color: "#8696a0", fontWeight: "500", marginTop: 4 },
 
-  userCard:     { flexDirection: "row", alignItems: "center", gap: 12, borderRadius: 16, padding: 14, borderWidth: 1.5, marginBottom: 10 },
-  avatar:       { width: 42, height: 42, borderRadius: 14, justifyContent: "center", alignItems: "center" },
-  avatarText:   { fontSize: 16, fontWeight: "900", color: "#fff" },
-  userName:     { fontSize: 14, fontWeight: "800", color: "#0f172a" },
-  userPhone:    { fontSize: 12, color: "#64748b", fontWeight: "500", marginTop: 2 },
-  youBadge:     { flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 9, paddingVertical: 4, borderRadius: 9, borderWidth: 1 },
-  youBadgeText: { fontSize: 11, fontWeight: "800" },
+  methodTabs:           { flexDirection: "row", marginHorizontal: 20, marginTop: 4, marginBottom: 2, backgroundColor: "#f4f8ff", borderRadius: 18, padding: 4, gap: 4 },
+  methodTab:            { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 5, paddingVertical: 11, borderRadius: 14 },
+  methodTabOn:          { backgroundColor: "#fff", shadowColor: "#000", shadowOpacity: 0.06, shadowRadius: 4, shadowOffset: { width: 0, height: 2 }, elevation: 2 },
+  methodTabText:        { fontSize: 11, fontWeight: "600", color: "#8696a0" },
+  methodTabTextOn:      { color: "#0cadab", fontWeight: "700" },
 
-  altContactRow:       { flexDirection: "row", alignItems: "center", gap: 10, backgroundColor: "#fff", borderRadius: 13, padding: 13, borderWidth: 1.5, borderColor: "#e8edf2", marginBottom: 10 },
-  altContactRowActive: { borderColor: "#fca5a5", backgroundColor: "#fff5f5" },
-  altContactText:      { flex: 1, fontSize: 13, fontWeight: "700" },
-  altContactCard:      { backgroundColor: "#fff", borderRadius: 16, padding: 14, borderWidth: 1, borderColor: "#e8edf2", marginBottom: 10 },
-  altContactHint:      { fontSize: 12, color: "#94a3b8", fontWeight: "500", marginBottom: 12 },
+  methodBody:           { paddingHorizontal: 20, paddingTop: 6 },
+  methodTitle:          { fontSize: 16, fontWeight: "800", color: "#101720", marginBottom: 4, marginTop: 10 },
+  methodSub:            { fontSize: 13, color: "#8696a0", fontWeight: "500", marginBottom: 4 },
 
-  priceCard:       { borderRadius: 22, padding: 20, marginTop: 10, marginBottom: 6 },
-  priceCardHeader: { flexDirection: "row", alignItems: "center", gap: 6, marginBottom: 14 },
-  priceLabel:      { fontSize: 10, fontWeight: "700", color: "rgba(255,255,255,0.35)", letterSpacing: 1 },
-  priceDivider:    { height: 1, backgroundColor: "rgba(255,255,255,0.07)", marginVertical: 10 },
-  priceRow:        { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 6 },
-  priceKey:        { fontSize: 13, color: "rgba(255,255,255,0.5)", fontWeight: "600" },
-  priceNoteTag:    { backgroundColor: "rgba(255,255,255,0.07)", paddingHorizontal: 7, paddingVertical: 2, borderRadius: 6 },
-  priceNote:       { fontSize: 9, color: "rgba(255,255,255,0.28)", fontWeight: "600", letterSpacing: 0.2 },
-  priceVal:        { fontSize: 13, fontWeight: "700", color: "#fff" },
+  // UPI apps grid
 
-  notice:     { flexDirection: "row", alignItems: "flex-start", gap: 10, backgroundColor: "#f0f9ff", borderRadius: 13, padding: 12, borderWidth: 1, borderColor: "#bae6fd", marginTop: 10 },
-  noticeIcon: { width: 26, height: 26, borderRadius: 8, justifyContent: "center", alignItems: "center" },
-  noticeText: { flex: 1, fontSize: 12, color: "#0369a1", fontWeight: "500", lineHeight: 17 },
+  upiNoneBox:           { backgroundColor: "#f9fafb", borderRadius: 14, padding: 16, borderWidth: 1, borderColor: "#e5e7eb", marginTop: 14, alignItems: "center", gap: 8 },
+  upiNoneText:          { fontSize: 13, color: "#6b7280", textAlign: "center", lineHeight: 19 },
+  upiNoneLink:          { marginTop: 4 },
+  upiNoneLinkText:      { fontSize: 13, fontWeight: "700", color: "#0cadab" },
+  upiAppGrid:           { flexDirection: "row", flexWrap: "wrap", gap: 10, marginTop: 14 },
+  upiAppCard:           { width: (width - 40 - 10 * 2) / 3, alignItems: "center", padding: 12, borderRadius: 16, backgroundColor: "#f9fafb", borderWidth: 1.5, borderColor: "#e5e7eb" },
+  upiAppCardOn:         { backgroundColor: "#f0fafa", borderWidth: 2 },
+  upiAppIcon:           { width: 44, height: 44, borderRadius: 12, marginBottom: 6 },
+  upiAppName:           { fontSize: 11, fontWeight: "600", color: "#374151", textAlign: "center" },
+  upiAppCheck:          { position: "absolute", top: 6, right: 6, width: 18, height: 18, borderRadius: 9, justifyContent: "center", alignItems: "center" },
 
-  ctaBar:     { position: "absolute", left: 0, right: 0, paddingHorizontal: 16, paddingTop: 14, paddingBottom: 80, borderTopWidth: 1, borderTopColor: "#e8edf2", backgroundColor: "#f8fafc" },
-  ctaBtn:     { borderRadius: 18, overflow: "hidden" },
-  ctaInner:   { flexDirection: "row", alignItems: "center", paddingHorizontal: 20, paddingVertical: 14, gap: 12 },
-  ctaText:    { fontSize: 15, fontWeight: "900", color: "#fff", letterSpacing: -0.3 },
-  ctaSubText: { fontSize: 11, color: "rgba(255,255,255,0.6)", fontWeight: "500", marginTop: 1 },
-  ctaArrow:   { width: 38, height: 38, borderRadius: 12, backgroundColor: "#fff", justifyContent: "center", alignItems: "center" },
-  rzpRow:     { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 5, marginTop: 8 },
-  rzpNote:    { fontSize: 11, color: "#94a3b8", fontWeight: "600" },
+  // UPI collect
+  upiExamples:          { flexDirection: "row", gap: 8, marginTop: 12 },
+  upiExampleChip:       { backgroundColor: "#f4f8ff", borderRadius: 10, paddingHorizontal: 12, paddingVertical: 6, borderWidth: 1, borderColor: "#e5e7eb" },
+  upiExampleText:       { fontSize: 12, fontWeight: "700", color: "#374151" },
 
-  // Success step
-  successOuter:     { flex: 1, backgroundColor: "#f0fdf4", alignItems: "center" },
-  lottieWrap:       { width: SCREEN_W * 0.65, height: SCREEN_W * 0.65, marginTop: 8 },
-  lottie:           { width: "100%", height: "100%" },
-  successContent:   { alignItems: "center", paddingHorizontal: 32, gap: 10, flex: 1 },
-  successTitle:     { fontSize: 24, fontWeight: "900", color: "#0f172a", letterSpacing: -0.5 },
-  successAmtRow:    { flexDirection: "row", alignItems: "flex-start", gap: 2 },
-  successCurrency:  { fontSize: 22, fontWeight: "700", color: "#16a34a", marginTop: 6 },
-  successAmt:       { fontSize: 44, fontWeight: "900", color: "#16a34a", letterSpacing: -1 },
-  successBadge:     { flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: "#fff", paddingHorizontal: 14, paddingVertical: 7, borderRadius: 20, borderWidth: 1, borderColor: "#bbf7d0" },
-  successBadgeText: { fontSize: 13, fontWeight: "700", color: "#16a34a" },
-  successSub:       { fontSize: 13, color: "#64748b", fontWeight: "500" },
-  progressTrack:    { width: "80%", height: 5, backgroundColor: "#bbf7d0", borderRadius: 3, overflow: "hidden", marginTop: 4 },
-  progressFill:     { height: 5, backgroundColor: "#16a34a", borderRadius: 3 },
-  successFooterRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", width: "80%", marginTop: 4 },
-  countdown:        { fontSize: 12, color: "#94a3b8", fontWeight: "500" },
-  skipBtn:          { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 16, paddingVertical: 8, borderRadius: 12 },
-  skipText:         { fontSize: 13, fontWeight: "800", color: "#fff" },
+  // Card
+  cardBrand:            { fontSize: 12, fontWeight: "700", color: "#0cadab", marginLeft: 6 },
 
-  // Receipt
-  receiptHeader:     { flexDirection: "row", alignItems: "center", gap: 12, padding: 20, paddingTop: 22, borderTopLeftRadius: 28, borderTopRightRadius: 28 },
-  receiptHeaderIcon: { width: 46, height: 46, borderRadius: 15, justifyContent: "center", alignItems: "center" },
-  receiptTitle:      { fontSize: 17, fontWeight: "900", color: "#000000", letterSpacing: -0.3 },
-  receiptOrderId:    { fontSize: 11, color: "rgba(44, 43, 43, 0.38)", fontWeight: "600", marginTop: 2 },
-  receiptClose:      { width: 32, height: 32, borderRadius: 10, backgroundColor: "rgba(255,255,255,0.1)", justifyContent: "center", alignItems: "center" },
+  // Processing
+  processingScreen:     { flex: 1, justifyContent: "center", alignItems: "center", gap: 20 },
+  processingCircle:     { width: 88, height: 88, borderRadius: 28, justifyContent: "center", alignItems: "center" },
+  processingTitle:      { fontSize: 18, fontWeight: "800", color: "#101720", textAlign: "center", paddingHorizontal: 30 },
+  processingSub:        { fontSize: 13, color: "#8696a0", textAlign: "center" },
 
-  amtBlock:      { alignItems: "center", paddingVertical: 24, gap: 8 },
-  amtLabel:      { fontSize: 10, color: "#94a3b8", fontWeight: "700", letterSpacing: 0.8 },
-  amtVal:        { fontSize: 42, fontWeight: "900", color: "#0f172a", letterSpacing: -1 },
-  paidBadge:     { flexDirection: "row", alignItems: "center", gap: 5, backgroundColor: "#f0fdf4", paddingHorizontal: 14, paddingVertical: 6, borderRadius: 20, borderWidth: 1, borderColor: "#bbf7d0" },
-  paidBadgeText: { fontSize: 12, fontWeight: "700", color: "#16a34a" },
+  // Success
+  successContent:       { alignItems: "center", paddingHorizontal: 20, paddingTop: 28, paddingBottom: 40 },
+  successLottie:        { width: 160, height: 160, marginBottom: 4 },
+  successTitle:         { fontSize: 24, fontWeight: "800", color: "#101720", letterSpacing: -0.5, marginBottom: 10, textAlign: "center" },
+  successSub:           { fontSize: 14, color: "#6b7280", textAlign: "center", lineHeight: 21, fontWeight: "500", marginBottom: 16, paddingHorizontal: 8 },
+  successPayPill:       { flexDirection: "row", alignItems: "center", gap: 7, backgroundColor: "#f0fdf4", borderRadius: 20, paddingHorizontal: 14, paddingVertical: 7, marginBottom: 20, borderWidth: 1, borderColor: "#bbf7d0" },
+  successPayPillText:   { fontSize: 12, color: "#16a34a", fontWeight: "700" },
+  successCard:          { width: "100%", backgroundColor: "#f9fafb", borderRadius: 18, padding: 16, borderWidth: 1, borderColor: "#eef0f3", marginBottom: 20 },
+  successRow:           { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
+  successRowLabel:      { fontSize: 13, color: "#8696a0", fontWeight: "600" },
+  successRowValue:      { fontSize: 13, fontWeight: "700", color: "#101720" },
+  successHighlight:     { color: "#0cadab", fontWeight: "800" },
 
-  rSection:      { marginBottom: 14 },
-  rSectionTitle: { fontSize: 10, fontWeight: "800", color: "#94a3b8", letterSpacing: 1, marginBottom: 8, paddingLeft: 2 },
-  rCard:         { backgroundColor: "#fff", borderRadius: 18, borderWidth: 1, borderColor: "#e8edf2", overflow: "hidden" },
-  rRow:          { flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 14, paddingVertical: 13 },
-  rRowIcon:      { width: 30, height: 30, borderRadius: 9, justifyContent: "center", alignItems: "center", borderWidth: 1 },
-  rRowLabel:     { fontSize: 12, color: "#94a3b8", fontWeight: "600", flex: 1 },
-  rRowVal:       { fontSize: 13, fontWeight: "700", color: "#0f172a", flex: 2, textAlign: "right" },
-  rDivider:      { height: 1, backgroundColor: "#f1f5f9", marginHorizontal: 14 },
+  successStickyBar:     { position: "absolute", bottom: 0, left: 0, right: 0, backgroundColor: "#fff", paddingHorizontal: 20, paddingTop: 12, paddingBottom: Platform.OS === "ios" ? 28 : 16, borderTopWidth: 1, borderTopColor: "#f3f4f6" },
+  successStickyBtn:     { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 10, backgroundColor: "#101720", borderRadius: 18, paddingVertical: 17 },
+  successStickyBtnText: { fontSize: 16, fontWeight: "800", color: "#fff" },
+  secondaryBtn:         { marginTop: 12, paddingVertical: 14, width: "100%", alignItems: "center" },
+  secondaryBtnText:     { fontSize: 15, color: "#8696a0", fontWeight: "600" },
 
-  rzpCard:     { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, marginTop: 8, marginBottom: 4, backgroundColor: "#f0fafa", borderRadius: 12, paddingVertical: 10, borderWidth: 1 },
-  rzpCardText: { fontSize: 12, fontWeight: "700" },
+  // UPI how-it-works box
+  upiHowBox:            { flexDirection: "row", gap: 8, alignItems: "flex-start", marginTop: 14, backgroundColor: "#f0fafa", borderRadius: 14, padding: 14, borderWidth: 1, borderColor: "#d0f0ef" },
+  upiHowText:           { flex: 1, fontSize: 12, color: "#374151", lineHeight: 18, fontWeight: "500" },
 
-  doneBtn:     { alignItems: "center", paddingVertical: 12, marginTop: 2 },
-  doneBtnText: { fontSize: 14, fontWeight: "600", color: "#64748b" },
+  // Cash option
+  cashInfoCard:         { backgroundColor: "#f0fdf4", borderRadius: 16, padding: 16, marginTop: 16, borderWidth: 1, borderColor: "#bbf7d0", gap: 10 },
+  cashInfoRow:          { flexDirection: "row", alignItems: "flex-start", gap: 10 },
+  cashInfoIcon:         { width: 22, height: 22, borderRadius: 7, backgroundColor: "#dcfce7", justifyContent: "center", alignItems: "center", marginTop: 1 },
+  cashInfoText:         { flex: 1, fontSize: 13, color: "#166534", fontWeight: "500", lineHeight: 19 },
+  cashWarning:          { flexDirection: "row", gap: 8, alignItems: "flex-start", marginTop: 12, backgroundColor: "#fffbeb", borderRadius: 12, padding: 12, borderWidth: 1, borderColor: "#fde68a" },
+  cashWarningText:      { flex: 1, fontSize: 12, color: "#92400e", lineHeight: 17, fontWeight: "500" },
 
-  // Plane overlay — covers the entire sheet content area
-  planeOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: "rgba(248,250,252,0.97)",
-    justifyContent: "center",
-    alignItems: "center",
-    zIndex: 50,
-    borderTopLeftRadius: 28,
-    borderTopRightRadius: 28,
-    gap: 8,
-  },
-  planeLottie:  { width: SCREEN_W * 0.62, height: SCREEN_W * 0.62 },
-  planeTitle:   { fontSize: 20, fontWeight: "900", color: "#0f172a", letterSpacing: -0.4, textAlign: "center" },
-  planeSub:     { fontSize: 13, color: "#64748b", fontWeight: "500", textAlign: "center" },
-  planeAmtPill: { flexDirection: "row", alignItems: "center", gap: 7, paddingHorizontal: 16, paddingVertical: 9, borderRadius: 20, borderWidth: 1, marginTop: 6 },
-  planeAmt:     { fontSize: 13, fontWeight: "700" },
+  // UPI waiting chips on processing screen
+  upiWaitingApps:       { flexDirection: "row", gap: 8, marginTop: 16, marginBottom: 8 },
+  upiWaitingChip:       { backgroundColor: "#f0fafa", borderRadius: 10, paddingHorizontal: 12, paddingVertical: 6, borderWidth: 1, borderColor: "#d0f0ef" },
+  upiWaitingChipText:   { fontSize: 12, fontWeight: "700", color: "#0cadab" },
+
+  // Payment sticky footer
+  paymentStickyBar:     { backgroundColor: "#fff", paddingHorizontal: 20, paddingTop: 12, paddingBottom: Platform.OS === "ios" ? 28 : 16, borderTopWidth: 1, borderTopColor: "#f3f4f6" },
+  paymentStickyBtn:     { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, backgroundColor: "#0cadab", borderRadius: 18, paddingVertical: 17 },
+  paymentStickyBtnText: { fontSize: 16, fontWeight: "800", color: "#fff" },
 });
