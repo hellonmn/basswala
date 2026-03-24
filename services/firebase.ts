@@ -1,64 +1,84 @@
 /**
  * services/firebase.ts
- * Firebase Phone Auth service for OTP-based login
+ * Firebase Phone Auth — modular API (v22+)
  *
- * Setup:
- *   npm install @react-native-firebase/app @react-native-firebase/auth
- *   npx expo prebuild --clean
- *
- * Add google-services.json (Android) and GoogleService-Info.plist (iOS)
- * to your project root before running.
+ * Setup checklist:
+ *   1. npm install @react-native-firebase/app @react-native-firebase/auth
+ *   2. Add to app.json plugins: ["@react-native-firebase/app", "@react-native-firebase/auth"]
+ *   3. Place google-services.json in project root
+ *   4. npx expo prebuild --clean
+ *   5. npx expo run:android
+ *   6. Enable Phone Auth in Firebase Console
+ *   7. Add SHA-1 fingerprint: cd android && ./gradlew signingReport
  */
 
-import auth, { FirebaseAuthTypes } from "@react-native-firebase/auth";
+import { getApp } from "@react-native-firebase/app";
+import {
+  getAuth,
+  signInWithPhoneNumber,
+  signOut,
+  PhoneAuthProvider,
+  signInWithCredential,
+} from "@react-native-firebase/auth";
+import type { ConfirmationResult } from "@react-native-firebase/auth";
 
-export type ConfirmationResult = FirebaseAuthTypes.ConfirmationResult;
+export type { ConfirmationResult };
 
 class FirebaseOTPService {
   private _confirmation: ConfirmationResult | null = null;
+  private _phone: string = "";
+
+  private get auth() {
+    return getAuth(getApp());
+  }
 
   /**
    * Send OTP to a phone number.
-   * Phone must be in E.164 format, e.g. +919876543210
+   * Automatically formats to E.164 (+91XXXXXXXXXX for Indian numbers).
    */
   async sendOTP(phoneNumber: string): Promise<void> {
     const formatted = this._formatPhone(phoneNumber);
-    this._confirmation = await auth().signInWithPhoneNumber(formatted);
+    this._phone = formatted;
+    this._confirmation = await signInWithPhoneNumber(this.auth, formatted);
   }
 
   /**
    * Verify the 6-digit OTP entered by the user.
-   * Returns the Firebase UID on success.
+   * Returns { uid, phone } on success.
    */
   async verifyOTP(otp: string): Promise<{ uid: string; phone: string }> {
     if (!this._confirmation) {
-      throw new Error("No pending OTP confirmation. Send OTP first.");
+      throw new Error("No pending OTP confirmation. Call sendOTP() first.");
     }
+
     const credential = await this._confirmation.confirm(otp);
+
     if (!credential?.user) {
-      throw new Error("OTP verification failed.");
+      throw new Error("OTP verification failed — no user returned.");
     }
-    const uid   = credential.user.uid;
-    const phone = credential.user.phoneNumber ?? "";
-    return { uid, phone };
+
+    return {
+      uid: credential.user.uid,
+      phone: credential.user.phoneNumber ?? this._phone,
+    };
   }
 
   /**
-   * Get Firebase ID token for the currently signed-in user.
-   * Pass this to your backend to authenticate server-side.
+   * Get Firebase ID token for the current user.
+   * Pass this to your backend /api/auth/firebase-login endpoint.
    */
   async getIdToken(): Promise<string | null> {
-    const user = auth().currentUser;
+    const user = this.auth.currentUser;
     if (!user) return null;
     return user.getIdToken(true);
   }
 
   /** Sign out the current Firebase session */
   async signOut(): Promise<void> {
-    await auth().signOut();
+    await signOut(this.auth);
   }
 
-  /** Convert 10-digit Indian number to E.164 if needed */
+  /** Convert 10-digit Indian number to E.164 */
   private _formatPhone(phone: string): string {
     const digits = phone.replace(/\D/g, "");
     if (phone.startsWith("+")) return phone;
