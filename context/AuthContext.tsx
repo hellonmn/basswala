@@ -118,12 +118,14 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
 
   // ── OTP login step 2 ──────────────────────────────────────────────────────
   const verifyOTP = async (otp: string) => {
+    // 1. Confirm OTP with Firebase — get uid + phone
     const { uid, phone } = await firebaseOTP.verifyOTP(otp);
 
-    // Exchange Firebase UID + token for your app's JWT
+    // 2. Get Firebase ID token to send to our backend
     const idToken = await firebaseOTP.getIdToken();
     if (!idToken) throw new Error("Could not get Firebase ID token.");
 
+    // 3. Exchange Firebase token for app JWT via POST /auth/firebase-login
     const response = await apiService.loginWithFirebase({ idToken, uid, phone });
 
     const { token, accessToken, user } = response;
@@ -131,6 +133,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     if (!finalToken) throw new Error("No token returned from server.");
     if (!user)       throw new Error("No user data returned from server.");
 
+    // 4. Persist tokens and user session
     await secureStorage.saveTokens(finalToken, finalToken);
     await secureStorage.saveUserData(String(user.id), user.email ?? "");
 

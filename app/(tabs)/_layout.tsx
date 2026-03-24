@@ -1,34 +1,32 @@
-import { Tabs } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
-import React, { useRef, useEffect } from "react";
+import { Tabs } from "expo-router";
+import React, { useEffect, useRef } from "react";
 import {
   Animated,
-  Pressable,
-  ActivityIndicator,
-  View,
-  StyleSheet,
-  Platform,
   Dimensions,
+  Platform,
+  Pressable,
+  StyleSheet,
+  Text,
+  View,
 } from "react-native";
-import { useAuth } from "@/context/AuthContext";
-import { Redirect } from "expo-router";
-import { addScrollListener, addSheetListener } from "@/utils/tabBarEmitter";
 
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
 
 // ─── Tab Config ───────────────────────────────────────────────────────────────
 
 const TABS = [
-  { name: "index",    label: "Home",     icon: "home",     iconOutline: "home-outline"     },
-  { name: "explore",  label: "Browse",   icon: "grid",     iconOutline: "grid-outline"     },
-  { name: "bookings", label: "Bookings", icon: "calendar", iconOutline: "calendar-outline" },
-  { name: "profile",  label: "Profile",  icon: "person",   iconOutline: "person-outline"   },
+  { name: "index",     label: "Home",      icon: "home",      iconOutline: "home-outline" },
+  { name: "earnings",  label: "Earnings",  icon: "cash",      iconOutline: "cash-outline" },
+  { name: "bookings",  label: "Bookings",  icon: "calendar",  iconOutline: "calendar-outline" },
+  { name: "inventory", label: "Inventory", icon: "grid",      iconOutline: "grid-outline" },
+  { name: "profile",   label: "Profile",   icon: "person",    iconOutline: "person-outline" },
 ];
 
-const BAR_H        = 64;
-const BAR_SIDE_PAD = 16;
-const BAR_WIDTH    = SCREEN_WIDTH - BAR_SIDE_PAD * 2;
-const HIDE_OFFSET  = BAR_H + (Platform.OS === "ios" ? 40 : 28);
+// Heights / spacing
+const BAR_H         = 80;
+const BOTTOM_INSET  = Platform.select({ ios: 34, android: 0, default: 0 })!;
+const TOTAL_BAR_H   = BAR_H + BOTTOM_INSET;
 
 // ─── Animated Tab Button ──────────────────────────────────────────────────────
 
@@ -49,30 +47,23 @@ function TabButton({
     Animated.spring(progress, {
       toValue: isFocused ? 1 : 0,
       useNativeDriver: false,
-      tension: 100,
-      friction: 14,
+      tension: 120,
+      friction: 16,
     }).start();
   }, [isFocused]);
 
+  // Pill background: transparent → #101720
   const pillBg = progress.interpolate({
-    inputRange: [0, 1],
+    inputRange:  [0, 1],
     outputRange: ["rgba(16,23,32,0)", "rgba(16,23,32,1)"],
   });
 
-  const labelMaxW = progress.interpolate({
-    inputRange: [0, 1],
-    outputRange: [0, 80],
-  });
+  // Label expand downward + fade
+  const labelMaxH = progress.interpolate({ inputRange: [0, 1], outputRange: [0, 18] });
+  const labelOp   = progress.interpolate({ inputRange: [0, 0.5, 1], outputRange: [0, 0, 1] });
 
-  const labelOp = progress.interpolate({
-    inputRange: [0, 0.5, 1],
-    outputRange: [0, 0, 1],
-  });
-
-  const pillScale = progress.interpolate({
-    inputRange: [0, 1],
-    outputRange: [0.96, 1],
-  });
+  // Scale bounce
+  const pillScale = progress.interpolate({ inputRange: [0, 0.5, 1], outputRange: [1, 0.94, 1] });
 
   return (
     <Pressable
@@ -84,29 +75,29 @@ function TabButton({
       <Animated.View
         style={[
           styles.pill,
-          {
-            backgroundColor: pillBg,
-            transform: [{ scale: pillScale }],
-          },
+          { backgroundColor: pillBg, transform: [{ scale: pillScale }] },
         ]}
       >
-        <Animated.Text>
-          <Ionicons
-            name={(isFocused ? tab.icon : tab.iconOutline) as any}
-            size={21}
-            color={isFocused ? "#fff" : "#8696a0"}
-          />
-        </Animated.Text>
+        {/* Icon */}
+        <Ionicons
+          name={(isFocused ? tab.icon : tab.iconOutline) as any}
+          size={20}
+          color={isFocused ? "#ffffff" : "#8696a0"}
+        />
 
-        <Animated.View style={{ maxWidth: labelMaxW, overflow: "hidden" }}>
+        {/* Expanding label below icon */}
+        <Animated.View style={{ maxHeight: labelMaxH, overflow: "hidden" }}>
           <Animated.Text
             style={[styles.tabLabel, { opacity: labelOp }]}
             numberOfLines={1}
           >
-            {" "}{tab.label}
+            {tab.label}
           </Animated.Text>
         </Animated.View>
       </Animated.View>
+
+      {/* Small dot beneath inactive icon */}
+      {!isFocused && <View style={styles.dot} />}
     </Pressable>
   );
 }
@@ -114,79 +105,11 @@ function TabButton({
 // ─── Custom Tab Bar ───────────────────────────────────────────────────────────
 
 function CustomTabBar({ state, navigation }: any) {
-  const translateY   = useRef(new Animated.Value(0)).current;
-  const lastY        = useRef(0);
-  const isHidden     = useRef(false);
-  // Separate flag so sheet-hide overrides scroll-hide and vice versa
-  const sheetOpen    = useRef(false);
-
-  const animateTo = (toValue: number) => {
-    Animated.spring(translateY, {
-      toValue,
-      useNativeDriver: true,
-      tension: 80,
-      friction: 14,
-    }).start();
-  };
-
-  // ── Sheet listener — hides bar while any booking sheet / modal is open ──
-  useEffect(() => {
-    const unsub = addSheetListener((visible: boolean) => {
-      sheetOpen.current = visible;
-      if (visible) {
-        // Sheet opened → immediately slide bar off screen
-        isHidden.current = true;
-        animateTo(HIDE_OFFSET);
-      } else {
-        // Sheet closed → slide bar back
-        isHidden.current = false;
-        animateTo(0);
-      }
-    });
-    return unsub;
-  }, [translateY]);
-
-  // ── Scroll listener — auto-hide while scrolling down ──
-  useEffect(() => {
-    const unsub = addScrollListener((currentY: number) => {
-      // Don't let scroll fight the sheet
-      if (sheetOpen.current) return;
-
-      const delta = currentY - lastY.current;
-      lastY.current = currentY;
-
-      if (currentY <= 10) {
-        if (isHidden.current) {
-          isHidden.current = false;
-          animateTo(0);
-        }
-        return;
-      }
-
-      if (delta > 6 && !isHidden.current) {
-        isHidden.current = true;
-        animateTo(HIDE_OFFSET);
-      } else if (delta < -6 && isHidden.current) {
-        isHidden.current = false;
-        animateTo(0);
-      }
-    });
-    return unsub;
-  }, [translateY]);
-
-  // ── Reset bar on tab change (only if sheet is not open) ──
-  useEffect(() => {
-    if (sheetOpen.current) return;
-    isHidden.current = false;
-    lastY.current    = 0;
-    animateTo(0);
-  }, [state.index, translateY]);
-
   return (
-    <Animated.View
-      style={[styles.barWrapper, { transform: [{ translateY }] }]}
-      pointerEvents="box-none"
-    >
+    <View style={styles.barContainer}>
+      {/* Thin accent line at top */}
+      <View style={styles.topLine} />
+
       <View style={styles.bar}>
         {state.routes.map((route: any, index: number) => {
           const isFocused = state.index === index;
@@ -214,27 +137,16 @@ function CustomTabBar({ state, navigation }: any) {
           );
         })}
       </View>
-    </Animated.View>
+
+      {/* Bottom safe-area fill — same bg so it blends */}
+      <View style={{ height: BOTTOM_INSET, backgroundColor: "#ffffff" }} />
+    </View>
   );
 }
 
 // ─── Layout ───────────────────────────────────────────────────────────────────
 
 export default function TabLayout() {
-  const { isAuthenticated, isLoading } = useAuth();
-
-  if (isLoading) {
-    return (
-      <View style={styles.loadingContainer}>
-        <ActivityIndicator size="large" color="#0cadab" />
-      </View>
-    );
-  }
-
-  if (!isAuthenticated) {
-    return <Redirect href="/(auth)/login" />;
-  }
-
   return (
     <Tabs
       screenOptions={{ headerShown: false }}
@@ -250,58 +162,68 @@ export default function TabLayout() {
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
-  loadingContainer: {
-    flex: 1,
-    justifyContent: "center",
-    alignItems: "center",
-    backgroundColor: "#f4f8ff",
-  },
-  barWrapper: {
+  // Sits flush at the very bottom — no floating
+  barContainer: {
     position: "absolute",
     bottom: 0,
     left: 0,
     right: 0,
-    alignItems: "center",
-    paddingBottom: Platform.select({ ios: 28, android: 14, default: 14 }),
-    paddingHorizontal: BAR_SIDE_PAD,
-    pointerEvents: "box-none",
+    backgroundColor: "#ffffff",
   },
+
+  // Hairline accent at the top edge of the bar
+  topLine: {
+    height: 1,
+    backgroundColor: "#eef0f3",
+  },
+
+  // The actual icon row
   bar: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-evenly",
-    backgroundColor: "#ffffff",
-    borderRadius: 28,
     height: BAR_H,
-    width: BAR_WIDTH,
-    paddingHorizontal: 10,
-    shadowColor: "#101720",
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.09,
-    shadowRadius: 20,
-    elevation: 10,
-    borderWidth: 1,
-    borderColor: "#eef0f3",
+    paddingHorizontal: 8,
+    backgroundColor: "#ffffff",
   },
+
+  // Each tab occupies equal flex share
   tabBtn: {
     flex: 1,
     alignItems: "center",
     justifyContent: "center",
     height: BAR_H,
+    // small dot below icon needs relative positioning context
+    position: "relative",
   },
+
+  // Content pill — icon on top, label below
   pill: {
-    flexDirection: "row",
+    flexDirection: "column",
     alignItems: "center",
     justifyContent: "center",
     paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderRadius: 20,
+    paddingVertical: 7,
+    borderRadius: 16,
+    minWidth: 56,
   },
+
   tabLabel: {
-    fontSize: 13,
+    fontSize: 11,
     fontWeight: "700",
     color: "#ffffff",
     letterSpacing: -0.2,
     flexShrink: 0,
+    marginTop: 3,
+  },
+
+  // 4px dot beneath inactive icons (subtle active-elsewhere hint)
+  dot: {
+    position: "absolute",
+    bottom: 8,
+    width: 4,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: "transparent", // invisible by default; tint if you want
   },
 });
