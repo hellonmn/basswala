@@ -1,210 +1,164 @@
-/**
- * context/AuthContext.tsx
- *
- * Supports two login flows:
- *   1. OTP login  — loginWithOTP(phone)  → verifyOTP(otp)
- *                   Firebase sends the OTP; backend validates Firebase token
- *                   and returns a JWT.
- *   2. Password   — login(email, password) (unchanged, for DJs / admins)
- *
- * New exports: loginWithOTP, verifyOTP, otpPending
- */
+import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import { authApi, tokenStorage } from '../services/captainApi';
+import auth from '@react-native-firebase/auth';   // ← react-native-firebase auth
 
-import React, { createContext, useContext, useState, useEffect, ReactNode } from "react";
-import { apiService } from "../services/api";
-import { secureStorage } from "../services/secureStorage";
-import { firebaseOTP } from "../services/firebase";
-
-// ─── Types ─────────────────────────────────────────────────────────────────────
-
-interface User {
-  id: string | number;
-  email: string;
-  firstName?: string;
-  lastName?: string;
-  name?: string;
+interface CaptainProfile {
+  id: number;
+  businessName?: string;
   phone?: string;
-  avatar?: string;
-  profilePicture?: string;
-  role?: "user" | "dj" | "admin";
-  dateOfBirth?: string;
-  isActive?: boolean;
-  isVerified?: boolean;
-  isEmailVerified?: boolean;
-  lastLogin?: string;
-  preferences?: any;
-  createdAt?: string;
-  updatedAt?: string;
   locationCity?: string;
-  locationState?: string;
+  isActive: boolean;
+  isVerified: boolean;
 }
 
-interface RegisterData {
+interface User {
+  id: number;
   firstName: string;
   lastName: string;
   email: string;
   phone: string;
-  password: string;
-  dateOfBirth?: string;
-  role?: "user" | "dj" | "admin";
+  role: string;
+  profilePicture?: string;
+  captainProfile?: CaptainProfile;
 }
 
 interface AuthContextType {
   user: User | null;
   isLoading: boolean;
   isAuthenticated: boolean;
-  otpPending: boolean;
-
-  /** OTP login step 1 — sends SMS via Firebase */
-  loginWithOTP: (phone: string) => Promise<void>;
-  /** OTP login step 2 — verifies OTP and exchanges Firebase token for app JWT */
-  verifyOTP: (otp: string) => Promise<void>;
-  /** Resend OTP to the same phone number */
-  resendOTP: () => Promise<void>;
-  /** Classic email/password login (DJs, admins) */
-  login: (emailOrPhone: string, password: string) => Promise<void>;
-  /** Register new user */
-  register: (data: RegisterData) => Promise<void>;
+  login: (email: string, password: string) => Promise<void>;
+  register: (data: {
+    firstName: string;
+    lastName: string;
+    email: string;
+    phone: string;
+    password: string;
+  }) => Promise<void>;
+  loginWithOTP: (phone: string) => Promise<any>;           // returns ConfirmationResult
+  verifyOTP: (otp: string, confirmationResult: any) => Promise<void>;
+  resendOTP: (phone: string) => Promise<any>;
   logout: () => Promise<void>;
-  resetPassword: (email: string) => Promise<void>;
   refreshUser: () => Promise<void>;
 }
 
-// ─── Context ───────────────────────────────────────────────────────────────────
-
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-// ─── Provider ──────────────────────────────────────────────────────────────────
-
 export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
-  const [user,       setUser]       = useState<User | null>(null);
-  const [isLoading,  setIsLoading]  = useState(true);
-  const [otpPending, setOtpPending] = useState(false);
-  const [_otpPhone,  _setOtpPhone]  = useState("");
+  const [user, setUser] = useState<User | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
 
-  useEffect(() => { checkAuthStatus(); }, []);
+  useEffect(() => {
+    checkAuthStatus();
+  }, []);
 
   const checkAuthStatus = async () => {
     try {
-      const token = await secureStorage.getAccessToken();
+      const token = await tokenStorage.get();
       if (token) {
-        const userData = await apiService.getMe();
-        const userObj  = userData.data ?? userData;
-        setUser(normaliseUser(userObj));
+        const storedUser = await tokenStorage.getUser();
+        if (storedUser) setUser(storedUser);
+
+        const res = await authApi.getMe();
+        if (res.success && res.data) {
+          setUser(res.data);
+          await tokenStorage.saveUser(res.data);
+        }
       }
-    } catch {
-      await secureStorage.clearAuth();
+    } catch (error) {
+      console.error('Auth check failed:', error);
+      await tokenStorage.clearAll();
+      setUser(null);
     } finally {
       setIsLoading(false);
     }
   };
 
-  const refreshUser = async () => {
+  const login = async (email: string, password: string) => {
+    const res = await authApi.login(email, password);
+    if (!res.success) throw new Error(res.message || 'Login failed');
+
+    await tokenStorage.save(res.token);
+    await tokenStorage.saveUser(res.user);
+    setUser(res.user);
+  };
+
+  const register = async (data: any) => {
+    const res = await authApi.register(data);
+    if (!res.success) throw new Error(res.message || 'Registration failed');
+
+    await tokenStorage.save(res.token);
+    await tokenStorage.saveUser(res.user);
+    setUser(res.user);
+  };
+
+  // ─── OTP Flow with react-native-firebase ─────────────────────────────────────
+  const loginWithOTP = async (phone: string) => {
+    const formattedPhone = phone.startsWith('+') ? phone : `+91${phone}`;
     try {
-      const userData = await apiService.getMe();
-      const userObj  = userData.data ?? userData;
-      setUser(normaliseUser(userObj));
-    } catch (err) {
-      console.error("refreshUser failed", err);
+      const confirmationResult = await auth().signInWithPhoneNumber(formattedPhone);
+      return confirmationResult;                 // important: return this object
+    } catch (error: any) {
+      console.error('loginWithOTP error:', error);
+      throw new Error(error.message || 'Failed to send OTP');
     }
   };
 
-  // ── OTP login step 1 ──────────────────────────────────────────────────────
-  const loginWithOTP = async (phone: string) => {
-    await firebaseOTP.sendOTP(phone);
-    _setOtpPhone(phone);
-    setOtpPending(true);
+  const verifyOTP = async (otp: string, confirmationResult: any) => {
+    try {
+      const firebaseCredential = await confirmationResult.confirm(otp);
+
+      const idToken = await firebaseCredential.user.getIdToken();
+
+      // Exchange Firebase ID token for your backend JWT
+      const res = await authApi.firebaseLogin(idToken);
+      console.log(res)
+
+      if (!res.success) throw new Error(res.message || 'Backend login failed');
+
+      await tokenStorage.save(res.token);
+      await tokenStorage.saveUser(res.user);
+      setUser(res.user);
+    } catch (error: any) {
+      console.error('verifyOTP error:', error);
+      throw new Error(error.message || 'Invalid OTP. Please try again.');
+    }
   };
 
-  // ── OTP login step 2 ──────────────────────────────────────────────────────
-  const verifyOTP = async (otp: string) => {
-    // 1. Confirm OTP with Firebase — get uid + phone
-    const { uid, phone } = await firebaseOTP.verifyOTP(otp);
-
-    // 2. Get Firebase ID token to send to our backend
-    const idToken = await firebaseOTP.getIdToken();
-    if (!idToken) throw new Error("Could not get Firebase ID token.");
-
-    // 3. Exchange Firebase token for app JWT via POST /auth/firebase-login
-    const response = await apiService.loginWithFirebase({ idToken, uid, phone });
-
-    const { token, accessToken, user } = response;
-    const finalToken = accessToken ?? token;
-    if (!finalToken) throw new Error("No token returned from server.");
-    if (!user)       throw new Error("No user data returned from server.");
-
-    // 4. Persist tokens and user session
-    await secureStorage.saveTokens(finalToken, finalToken);
-    await secureStorage.saveUserData(String(user.id), user.email ?? "");
-
-    setUser(normaliseUser(user));
-    setOtpPending(false);
-    _setOtpPhone("");
+  const resendOTP = async (phone: string) => {
+    // Simply call loginWithOTP again (Firebase handles rate limiting)
+    return loginWithOTP(phone);
   };
 
-  // ── Resend OTP ────────────────────────────────────────────────────────────
-  const resendOTP = async () => {
-    if (!_otpPhone) throw new Error("No phone number to resend OTP to.");
-    await firebaseOTP.sendOTP(_otpPhone);
-  };
-
-  // ── Password login ────────────────────────────────────────────────────────
-  const login = async (identifier: string, password: string) => {
-    const payload = identifier.includes("@")
-      ? { email: identifier, password }
-      : { phone: identifier, password };
-    const response = await apiService.login(payload);
-
-    const { token, accessToken, refreshToken, user } = response;
-    const finalAccess  = accessToken ?? token;
-    const finalRefresh = refreshToken ?? token;
-
-    if (!finalAccess || typeof finalAccess !== "string") throw new Error("Invalid token from server.");
-    if (!user || !user.id) throw new Error("Invalid user data from server.");
-
-    await secureStorage.saveTokens(finalAccess, finalRefresh);
-    await secureStorage.saveUserData(String(user.id), user.email ?? "");
-    setUser(normaliseUser(user));
-  };
-
-  // ── Register ──────────────────────────────────────────────────────────────
-  const register = async (data: RegisterData) => {
-    const response = await apiService.register({
-      firstName:   data.firstName.trim(),
-      lastName:    data.lastName.trim(),
-      email:       data.email.trim().toLowerCase(),
-      phone:       data.phone.trim(),
-      password:    data.password,
-      dateOfBirth: data.dateOfBirth?.trim() || undefined,
-      role:        data.role ?? "user",
-    });
-
-    const { token, user } = response;
-    if (!token || !user?.id) throw new Error("Registration failed.");
-
-    await secureStorage.saveTokens(token, token);
-    await secureStorage.saveUserData(String(user.id), user.email ?? "");
-    setUser(normaliseUser(user));
-  };
-
-  // ── Logout ────────────────────────────────────────────────────────────────
   const logout = async () => {
-    try { await apiService.logout(); } catch {}
-    try { await firebaseOTP.signOut(); } catch {}
-    await secureStorage.clearAuth();
+    await auth().signOut();           // optional: sign out from Firebase too
+    await tokenStorage.clearAll();
     setUser(null);
-    setOtpPending(false);
   };
 
-  const resetPassword = async (email: string) => {
-    await apiService.resetPassword(email);
+  const refreshUser = async () => {
+    try {
+      const res = await authApi.getMe();
+      if (res.success && res.data) {
+        setUser(res.data);
+        await tokenStorage.saveUser(res.data);
+      }
+    } catch (error) {
+      console.error('Refresh user failed:', error);
+    }
   };
 
   return (
     <AuthContext.Provider value={{
-      user, isLoading, isAuthenticated: !!user, otpPending,
-      loginWithOTP, verifyOTP, resendOTP,
-      login, register, logout, resetPassword, refreshUser,
+      user,
+      isLoading,
+      isAuthenticated: !!user,
+      login,
+      register,
+      logout,
+      refreshUser,
+      loginWithOTP,
+      verifyOTP,
+      resendOTP,
     }}>
       {children}
     </AuthContext.Provider>
@@ -212,17 +166,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
 };
 
 export const useAuth = () => {
-  const ctx = useContext(AuthContext);
-  if (!ctx) throw new Error("useAuth must be used within an AuthProvider");
-  return ctx;
+  const context = useContext(AuthContext);
+  if (!context) throw new Error('useAuth must be used within AuthProvider');
+  return context;
 };
-
-// ─── Helpers ───────────────────────────────────────────────────────────────────
-
-function normaliseUser(u: any): User {
-  return {
-    ...u,
-    name: u.name ?? (u.firstName && u.lastName ? `${u.firstName} ${u.lastName}` : undefined),
-    id:   String(u.id ?? ""),
-  };
-}

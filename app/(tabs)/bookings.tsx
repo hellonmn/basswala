@@ -1,728 +1,825 @@
-import React, { useState } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import {
+  ActivityIndicator,
+  Alert,
   Dimensions,
+  FlatList,
+  Modal,
+  RefreshControl,
   ScrollView,
   StatusBar,
   StyleSheet,
   Text,
+  TextInput,
   TouchableOpacity,
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { LinearGradient } from "expo-linear-gradient";
+import { bookingApi } from "../../services/captainApi";
 
 const { width } = Dimensions.get("window");
 
-// ─── Mock Data ────────────────────────────────────────────────────────────────
+// ─── Types ────────────────────────────────────────────────────────────────────
+interface Booking {
+  id: number;
+  status: string;
+  paymentStatus: string;
+  eventType: string;
+  eventDate: string;
+  startTime: string;
+  endTime: string;
+  durationHours: number;
+  guestCount?: number;
+  specialRequests?: string;
+  deliveryCity?: string;
+  deliveryStreet?: string;
+  deliveryState?: string;
+  deliveryDistanceKm?: number;
+  djFee: number;
+  equipmentFee: number;
+  deliveryFee: number;
+  totalAmount: number;
+  captainNotes?: string;
+  equipmentItems?: any[];
+  createdAt: string;
+  user?: {
+    id: number;
+    firstName: string;
+    lastName: string;
+    phone: string;
+    email: string;
+    locationCity?: string;
+  };
+  dj?: {
+    id: number;
+    name: string;
+    phone?: string;
+  };
+}
 
-const earningsSummary = {
-  today: 4500,
-  thisWeek: 28500,
-  thisMonth: 95000,
-  pending: 12000,
-  totalTrips: 88,
-  onlineHours: "9.5",
-  avgTrip: 1575,
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+const STATUS_CONFIG: Record<string, { color: string; bg: string; border: string; icon: string }> = {
+  Pending:              { color: "#f59e0b", bg: "#fffbeb", border: "#fde68a", icon: "time-outline" },
+  Confirmed:            { color: "#0cadab", bg: "#f0fffe", border: "#a5f3fc", icon: "checkmark-circle-outline" },
+  "Equipment Dispatched": { color: "#6366f1", bg: "#eef2ff", border: "#c7d2fe", icon: "car-outline" },
+  "In Progress":        { color: "#22c55e", bg: "#f0fdf4", border: "#bbf7d0", icon: "play-circle-outline" },
+  Completed:            { color: "#8696a0", bg: "#f8fafc", border: "#e2e8f0", icon: "checkmark-done-outline" },
+  Cancelled:            { color: "#ef4444", bg: "#fef2f2", border: "#fecaca", icon: "close-circle-outline" },
 };
 
-type Period = "weekly" | "monthly";
-
-const chartData: Record<Period, { label: string; amount: number; trips: number }[]> = {
-  weekly: [
-    { label: "Mon", amount: 3200, trips: 8 },
-    { label: "Tue", amount: 4800, trips: 12 },
-    { label: "Wed", amount: 2900, trips: 7 },
-    { label: "Thu", amount: 5100, trips: 14 },
-    { label: "Fri", amount: 6400, trips: 18 },
-    { label: "Sat", amount: 7200, trips: 21 },
-    { label: "Sun", amount: 3800, trips: 9 },
-  ],
-  monthly: [
-    { label: "Wk 1", amount: 22000, trips: 52 },
-    { label: "Wk 2", amount: 28500, trips: 61 },
-    { label: "Wk 3", amount: 19800, trips: 47 },
-    { label: "Wk 4", amount: 24700, trips: 58 },
-  ],
+const PAYMENT_CONFIG: Record<string, { color: string; bg: string }> = {
+  Pending:       { color: "#f59e0b", bg: "#fffbeb" },
+  Paid:          { color: "#22c55e", bg: "#f0fdf4" },
+  "Partially Paid": { color: "#6366f1", bg: "#eef2ff" },
+  Refunded:      { color: "#8696a0", bg: "#f8fafc" },
 };
 
-const recentTrips = [
-  {
-    id: "TR-8821",
-    time: "2:45 PM",
-    eventName: "Wedding Reception",
-    client: "Priya Mehta",
-    location: "Malviya Nagar, Jaipur",
-    fare: 15000,
-    tip: 500,
-    status: "completed",
-  },
-  {
-    id: "TR-8820",
-    time: "12:10 PM",
-    eventName: "Birthday Party",
-    client: "Amit Kumar",
-    location: "Vaishali Nagar, Jaipur",
-    fare: 8500,
-    tip: 200,
-    status: "completed",
-  },
-  {
-    id: "TR-8819",
-    time: "10:30 AM",
-    eventName: "Corporate Event",
-    client: "Tech Solutions Pvt Ltd",
-    location: "C-Scheme, Jaipur",
-    fare: 25000,
-    tip: 1000,
-    status: "completed",
-  },
-  {
-    id: "TR-8818",
-    time: "8:05 AM",
-    eventName: "DJ Night",
-    client: "Club Luxe",
-    location: "MI Road, Jaipur",
-    fare: 18000,
-    tip: 750,
-    status: "completed",
-  },
-];
+const fmt = (dateStr: string) => {
+  const d = new Date(dateStr);
+  return d.toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" });
+};
 
-const statCards = [
-  { label: "Total Trips", value: String(earningsSummary.totalTrips), icon: "musical-notes-outline", color: "#0cadab", bg: "#f0fffe" },
-  { label: "Online Hours", value: earningsSummary.onlineHours + "h", icon: "time-outline", color: "#22c55e", bg: "#f0fdf4" },
-  { label: "Avg. Trip", value: "₹" + earningsSummary.avgTrip.toLocaleString(), icon: "trending-up-outline", color: "#f59e0b", bg: "#fffbeb" },
-  { label: "Rating", value: "4.9", icon: "star-outline", color: "#6366f1", bg: "#eef2ff" },
-];
+const fmtTime = (dateStr: string) => {
+  const d = new Date(dateStr);
+  return d.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" });
+};
 
-// ─── Bar Chart ────────────────────────────────────────────────────────────────
+// ─── Status Update Modal ──────────────────────────────────────────────────────
+const StatusModal = ({
+  visible,
+  booking,
+  onClose,
+  onUpdate,
+}: {
+  visible: boolean;
+  booking: Booking | null;
+  onClose: () => void;
+  onUpdate: (status: string, notes?: string) => void;
+}) => {
+  const [notes, setNotes] = useState("");
+  const [updating, setUpdating] = useState(false);
 
-const BAR_HEIGHT = 120;
+  useEffect(() => { if (!visible) setNotes(""); }, [visible]);
 
-const EarningsChart = ({ period, onChangePeriod }: { period: Period; onChangePeriod: (p: Period) => void }) => {
-  const data = chartData[period];
-  const max = Math.max(...data.map((d) => d.amount));
-  const total = data.reduce((s, d) => s + d.amount, 0);
+  const handleUpdate = async (status: string) => {
+    setUpdating(true);
+    onUpdate(status, notes || undefined);
+    setUpdating(false);
+    onClose();
+  };
+
+  if (!booking) return null;
 
   return (
-    <View style={styles.sectionCard}>
-      {/* Header row */}
-      <View style={styles.chartHeader}>
-        <View>
-          <Text style={styles.sectionTitle}>Earnings Overview</Text>
-          <Text style={styles.chartTotal}>₹{total.toLocaleString()}</Text>
-        </View>
-        <View style={styles.pillRow}>
-          {(["weekly", "monthly"] as Period[]).map((p) => (
-            <TouchableOpacity
-              key={p}
-              onPress={() => onChangePeriod(p)}
-              style={[styles.pill, period === p && styles.pillActive]}
-              activeOpacity={0.8}
-            >
-              <Text style={[styles.pillText, period === p && styles.pillTextActive]}>
-                {p.charAt(0).toUpperCase() + p.slice(1)}
-              </Text>
-            </TouchableOpacity>
-          ))}
-        </View>
-      </View>
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+      <View style={modalS.overlay}>
+        <View style={modalS.sheet}>
+          <View style={modalS.handle} />
+          <Text style={modalS.title}>Update Booking Status</Text>
+          <Text style={modalS.bookingId}>Booking #{booking.id} · {booking.user?.firstName} {booking.user?.lastName}</Text>
 
-      {/* Bars */}
-      <View style={styles.barsContainer}>
-        {data.map((d, i) => {
-          const barH = Math.max(8, (d.amount / max) * BAR_HEIGHT);
-          const isHighest = d.amount === max;
-          return (
-            <View key={i} style={styles.barWrapper}>
-              <View style={[styles.barTrack, { height: BAR_HEIGHT }]}>
-                {isHighest ? (
-                  <LinearGradient
-                    colors={["#0cadab", "#0a9998"]}
-                    style={[styles.bar, { height: barH }]}
-                  />
-                ) : (
-                  <View style={[styles.bar, styles.barInactive, { height: barH }]} />
-                )}
-              </View>
-              <Text style={styles.barLabel}>{d.label}</Text>
-            </View>
-          );
-        })}
+          <TextInput
+            style={modalS.notesInput}
+            placeholder="Add captain notes (optional)..."
+            placeholderTextColor="#8696a0"
+            value={notes}
+            onChangeText={setNotes}
+            multiline
+            numberOfLines={3}
+          />
+
+          <View style={modalS.statusGrid}>
+            {bookingApi.STATUSES.filter(s => s !== booking.status).map(status => {
+              const cfg = STATUS_CONFIG[status] || STATUS_CONFIG.Pending;
+              return (
+                <TouchableOpacity
+                  key={status}
+                  style={[modalS.statusBtn, { backgroundColor: cfg.bg, borderColor: cfg.border }]}
+                  onPress={() => handleUpdate(status)}
+                  disabled={updating}
+                  activeOpacity={0.8}
+                >
+                  <Ionicons name={cfg.icon as any} size={18} color={cfg.color} />
+                  <Text style={[modalS.statusBtnText, { color: cfg.color }]}>{status}</Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+
+          <TouchableOpacity style={modalS.cancelBtn} onPress={onClose}>
+            <Text style={modalS.cancelBtnText}>Cancel</Text>
+          </TouchableOpacity>
+        </View>
       </View>
-    </View>
+    </Modal>
   );
 };
 
-// ─── Trip Row ─────────────────────────────────────────────────────────────────
+// ─── Booking Detail Modal ─────────────────────────────────────────────────────
+const BookingDetailModal = ({
+  visible,
+  booking,
+  onClose,
+  onStatusPress,
+  onPaymentUpdate,
+}: {
+  visible: boolean;
+  booking: Booking | null;
+  onClose: () => void;
+  onStatusPress: () => void;
+  onPaymentUpdate: (status: string) => void;
+}) => {
+  if (!booking) return null;
 
-const TripRow = ({ trip }: { trip: typeof recentTrips[0] }) => (
-  <TouchableOpacity style={styles.tripCard} activeOpacity={0.88}>
-    <View style={styles.tripIconWrap}>
-      <LinearGradient colors={["#f0fffe", "#e0f7f6"]} style={styles.tripIcon}>
-        <Ionicons name="musical-notes" size={20} color="#0cadab" />
-      </LinearGradient>
+  const sCfg = STATUS_CONFIG[booking.status] || STATUS_CONFIG.Pending;
+  const pCfg = PAYMENT_CONFIG[booking.paymentStatus] || PAYMENT_CONFIG.Pending;
+
+  const Row = ({ icon, label, value }: { icon: string; label: string; value: string }) => (
+    <View style={detailS.row}>
+      <Ionicons name={icon as any} size={16} color="#8696a0" style={detailS.rowIcon} />
+      <View style={detailS.rowContent}>
+        <Text style={detailS.rowLabel}>{label}</Text>
+        <Text style={detailS.rowValue}>{value}</Text>
+      </View>
     </View>
+  );
 
-    <View style={styles.tripBody}>
-      <View style={styles.tripTitleRow}>
-        <Text style={styles.tripEventName} numberOfLines={1}>{trip.eventName}</Text>
-        <Text style={styles.tripFare}>₹{trip.fare.toLocaleString()}</Text>
-      </View>
-      <View style={styles.tripMeta}>
-        <Ionicons name="person-outline" size={12} color="#8696a0" />
-        <Text style={styles.tripMetaText}>{trip.client}</Text>
-        <Text style={styles.tripDot}>·</Text>
-        <Ionicons name="time-outline" size={12} color="#8696a0" />
-        <Text style={styles.tripMetaText}>{trip.time}</Text>
-      </View>
-      <View style={styles.tripMeta}>
-        <Ionicons name="location-outline" size={12} color="#8696a0" />
-        <Text style={styles.tripMetaText} numberOfLines={1}>{trip.location}</Text>
-      </View>
-    </View>
+  return (
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+      <View style={detailS.overlay}>
+        <View style={detailS.sheet}>
+          <View style={detailS.handle} />
 
-    {trip.tip > 0 && (
-      <View style={styles.tipBadge}>
-        <Text style={styles.tipText}>+₹{trip.tip}</Text>
-        <Text style={styles.tipLabel}> tip</Text>
+          <ScrollView showsVerticalScrollIndicator={false}>
+            {/* Header */}
+            <View style={detailS.header}>
+              <View style={detailS.headerLeft}>
+                <Text style={detailS.eventType}>{booking.eventType}</Text>
+                <Text style={detailS.bookingId}>Booking #{booking.id}</Text>
+              </View>
+              <View style={[detailS.statusBadge, { backgroundColor: sCfg.bg, borderColor: sCfg.border }]}>
+                <Ionicons name={sCfg.icon as any} size={13} color={sCfg.color} />
+                <Text style={[detailS.statusText, { color: sCfg.color }]}>{booking.status}</Text>
+              </View>
+            </View>
+
+            {/* Client Info */}
+            <View style={detailS.section}>
+              <Text style={detailS.sectionTitle}>CLIENT</Text>
+              <View style={detailS.clientCard}>
+                <View style={detailS.clientAvatar}>
+                  <Text style={detailS.clientInitial}>
+                    {booking.user?.firstName?.[0]?.toUpperCase() ?? "?"}
+                  </Text>
+                </View>
+                <View style={detailS.clientInfo}>
+                  <Text style={detailS.clientName}>
+                    {booking.user?.firstName} {booking.user?.lastName}
+                  </Text>
+                  <Text style={detailS.clientPhone}>{booking.user?.phone}</Text>
+                </View>
+                <TouchableOpacity style={detailS.callBtn}>
+                  <Ionicons name="call-outline" size={18} color="#0cadab" />
+                </TouchableOpacity>
+              </View>
+            </View>
+
+            {/* Event Info */}
+            <View style={detailS.section}>
+              <Text style={detailS.sectionTitle}>EVENT DETAILS</Text>
+              <Row icon="calendar-outline" label="Date" value={fmt(booking.eventDate)} />
+              <Row icon="time-outline" label="Time" value={`${booking.startTime} – ${booking.endTime} (${booking.durationHours}h)`} />
+              {booking.guestCount ? <Row icon="people-outline" label="Guests" value={String(booking.guestCount)} /> : null}
+              {booking.deliveryCity ? <Row icon="location-outline" label="Location" value={`${booking.deliveryStreet || ""} ${booking.deliveryCity}`} /> : null}
+              {booking.deliveryDistanceKm ? <Row icon="navigate-outline" label="Distance" value={`${booking.deliveryDistanceKm} km`} /> : null}
+            </View>
+
+            {/* DJ */}
+            {booking.dj ? (
+              <View style={detailS.section}>
+                <Text style={detailS.sectionTitle}>DJ</Text>
+                <Row icon="musical-notes-outline" label="Name" value={booking.dj.name} />
+                {booking.dj.phone ? <Row icon="call-outline" label="Phone" value={booking.dj.phone} /> : null}
+              </View>
+            ) : null}
+
+            {/* Equipment */}
+            {booking.equipmentItems && booking.equipmentItems.length > 0 ? (
+              <View style={detailS.section}>
+                <Text style={detailS.sectionTitle}>EQUIPMENT ({booking.equipmentItems.length} items)</Text>
+                {booking.equipmentItems.map((item: any, i: number) => (
+                  <View key={i} style={detailS.equipItem}>
+                    <Ionicons name="hardware-chip-outline" size={14} color="#0cadab" />
+                    <Text style={detailS.equipName}>
+                      {item.name} × {item.quantity} ({item.days}d)
+                    </Text>
+                    <Text style={detailS.equipPrice}>₹{(item.itemTotal || 0).toLocaleString()}</Text>
+                  </View>
+                ))}
+              </View>
+            ) : null}
+
+            {/* Pricing */}
+            <View style={detailS.section}>
+              <Text style={detailS.sectionTitle}>PRICING</Text>
+              {booking.djFee > 0 ? <View style={detailS.priceRow}>
+                <Text style={detailS.priceLabel}>DJ Fee</Text>
+                <Text style={detailS.priceVal}>₹{Number(booking.djFee).toLocaleString()}</Text>
+              </View> : null}
+              {booking.equipmentFee > 0 ? <View style={detailS.priceRow}>
+                <Text style={detailS.priceLabel}>Equipment Fee</Text>
+                <Text style={detailS.priceVal}>₹{Number(booking.equipmentFee).toLocaleString()}</Text>
+              </View> : null}
+              {booking.deliveryFee > 0 ? <View style={detailS.priceRow}>
+                <Text style={detailS.priceLabel}>Delivery Fee</Text>
+                <Text style={detailS.priceVal}>₹{Number(booking.deliveryFee).toLocaleString()}</Text>
+              </View> : null}
+              <View style={[detailS.priceRow, detailS.totalRow]}>
+                <Text style={detailS.totalLabel}>Total</Text>
+                <Text style={detailS.totalVal}>₹{Number(booking.totalAmount).toLocaleString()}</Text>
+              </View>
+            </View>
+
+            {/* Payment Status */}
+            <View style={detailS.section}>
+              <Text style={detailS.sectionTitle}>PAYMENT</Text>
+              <View style={detailS.paymentRow}>
+                <View style={[detailS.payBadge, { backgroundColor: pCfg.bg }]}>
+                  <Text style={[detailS.payBadgeText, { color: pCfg.color }]}>{booking.paymentStatus}</Text>
+                </View>
+                <View style={detailS.payBtns}>
+                  {["Paid", "Partially Paid", "Refunded"].map(s => (
+                    <TouchableOpacity
+                      key={s}
+                      onPress={() => onPaymentUpdate(s)}
+                      style={[detailS.payBtn, booking.paymentStatus === s && detailS.payBtnActive]}
+                    >
+                      <Text style={[detailS.payBtnText, booking.paymentStatus === s && detailS.payBtnTextActive]}>
+                        {s}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              </View>
+            </View>
+
+            {/* Special Requests */}
+            {booking.specialRequests ? (
+              <View style={detailS.section}>
+                <Text style={detailS.sectionTitle}>SPECIAL REQUESTS</Text>
+                <Text style={detailS.specialReq}>{booking.specialRequests}</Text>
+              </View>
+            ) : null}
+
+            {/* Notes */}
+            {booking.captainNotes ? (
+              <View style={detailS.section}>
+                <Text style={detailS.sectionTitle}>CAPTAIN NOTES</Text>
+                <Text style={detailS.specialReq}>{booking.captainNotes}</Text>
+              </View>
+            ) : null}
+
+            {/* Actions */}
+            <View style={detailS.actions}>
+              <TouchableOpacity style={detailS.updateBtn} onPress={onStatusPress} activeOpacity={0.8}>
+                <LinearGradient colors={["#0cadab", "#0a9998"]} style={detailS.updateBtnGrad}>
+                  <Ionicons name="swap-horizontal-outline" size={16} color="#fff" />
+                  <Text style={detailS.updateBtnText}>Update Status</Text>
+                </LinearGradient>
+              </TouchableOpacity>
+              <TouchableOpacity style={detailS.closeBtn} onPress={onClose}>
+                <Text style={detailS.closeBtnText}>Close</Text>
+              </TouchableOpacity>
+            </View>
+          </ScrollView>
+        </View>
       </View>
-    )}
-  </TouchableOpacity>
-);
+    </Modal>
+  );
+};
+
+// ─── Booking Card ─────────────────────────────────────────────────────────────
+const BookingCard = ({
+  booking,
+  onPress,
+}: {
+  booking: Booking;
+  onPress: () => void;
+}) => {
+  const cfg = STATUS_CONFIG[booking.status] || STATUS_CONFIG.Pending;
+  const pCfg = PAYMENT_CONFIG[booking.paymentStatus] || PAYMENT_CONFIG.Pending;
+
+  return (
+    <TouchableOpacity style={styles.card} onPress={onPress} activeOpacity={0.88}>
+      {/* Top row */}
+      <View style={styles.cardTop}>
+        <View style={styles.cardTopLeft}>
+          <Text style={styles.cardEvent}>{booking.eventType}</Text>
+          <Text style={styles.cardId}>#{booking.id}</Text>
+        </View>
+        <View style={[styles.cardStatus, { backgroundColor: cfg.bg, borderColor: cfg.border }]}>
+          <Ionicons name={cfg.icon as any} size={12} color={cfg.color} />
+          <Text style={[styles.cardStatusText, { color: cfg.color }]}>{booking.status}</Text>
+        </View>
+      </View>
+
+      {/* Client */}
+      <View style={styles.cardRow}>
+        <Ionicons name="person-outline" size={14} color="#8696a0" />
+        <Text style={styles.cardRowText}>
+          {booking.user?.firstName} {booking.user?.lastName}
+        </Text>
+        <Text style={styles.cardPhone}>{booking.user?.phone}</Text>
+      </View>
+
+      {/* Date & Location */}
+      <View style={styles.cardRow}>
+        <Ionicons name="calendar-outline" size={14} color="#8696a0" />
+        <Text style={styles.cardRowText}>{fmt(booking.eventDate)} · {booking.startTime}</Text>
+      </View>
+
+      {booking.deliveryCity ? (
+        <View style={styles.cardRow}>
+          <Ionicons name="location-outline" size={14} color="#8696a0" />
+          <Text style={styles.cardRowText} numberOfLines={1}>{booking.deliveryCity}</Text>
+        </View>
+      ) : null}
+
+      {/* Footer */}
+      <View style={styles.cardFooter}>
+        <View>
+          <Text style={styles.cardAmountLabel}>TOTAL</Text>
+          <Text style={styles.cardAmount}>₹{Number(booking.totalAmount).toLocaleString()}</Text>
+        </View>
+        <View style={styles.cardFooterRight}>
+          <View style={[styles.payBadge, { backgroundColor: pCfg.bg }]}>
+            <Text style={[styles.payBadgeText, { color: pCfg.color }]}>{booking.paymentStatus}</Text>
+          </View>
+          <Ionicons name="chevron-forward" size={16} color="#c4c9d0" />
+        </View>
+      </View>
+    </TouchableOpacity>
+  );
+};
 
 // ─── Main Screen ──────────────────────────────────────────────────────────────
+export default function BookingsScreen() {
+  const [bookings, setBookings] = useState<Booking[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [selectedStatus, setSelectedStatus] = useState<string>("All");
+  const [page, setPage] = useState(1);
+  const [hasMore, setHasMore] = useState(true);
+  const [totalCount, setTotalCount] = useState(0);
 
-export default function CaptainEarningsScreen() {
-  const [period, setPeriod] = useState<Period>("weekly");
+  const [selectedBooking, setSelectedBooking] = useState<Booking | null>(null);
+  const [showDetail, setShowDetail] = useState(false);
+  const [showStatusModal, setShowStatusModal] = useState(false);
+
+  const LIMIT = 20;
+  const ALL_STATUSES = ["All", ...bookingApi.STATUSES];
+
+  const fetchBookings = useCallback(async (reset = false) => {
+    try {
+      const currentPage = reset ? 1 : page;
+      const params: any = { page: currentPage, limit: LIMIT };
+      if (selectedStatus !== "All") params.status = selectedStatus;
+
+      const res = await bookingApi.getAll(params);
+      console.log("response:", res);
+      if (res.success) {
+        const newData = res.data || [];
+        setTotalCount(res.count || 0);
+        setHasMore(currentPage < (res.totalPages || 1));
+        setBookings(prev => reset ? newData : [...prev, ...newData]);
+        if (!reset) setPage(p => p + 1);
+      }
+    } catch (err: any) {
+      console.error("Bookings fetch error:", err.response?.data || err.message);
+      console.error("Status:", err.response?.status);
+      console.error("Full error:", err);
+
+      let msg = err.message || "Failed to fetch bookings";
+      if (err.response?.status === 403) {
+        msg = err.response.data?.message || "Access denied. Please complete captain profile or re-login.";
+        Alert.alert("Access Denied", msg);
+      } else {
+        Alert.alert("Error", msg);
+      }
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  }, [page, selectedStatus]);
+
+  useEffect(() => {
+    setLoading(true);
+    setPage(1);
+    setBookings([]);
+    fetchBookings(true);
+  }, [selectedStatus]);
+
+  const onRefresh = () => {
+    setRefreshing(true);
+    setPage(1);
+    fetchBookings(true);
+  };
+
+  const handleStatusUpdate = async (status: string, notes?: string) => {
+    if (!selectedBooking) return;
+    try {
+      const res = await bookingApi.updateStatus(selectedBooking.id, status, notes);
+      if (res.success) {
+        setBookings(prev =>
+          prev.map(b => b.id === selectedBooking.id
+            ? { ...b, status, captainNotes: notes || b.captainNotes }
+            : b)
+        );
+        setSelectedBooking(prev => prev ? { ...prev, status, captainNotes: notes || prev.captainNotes } : null);
+        Alert.alert("Updated", `Status changed to ${status}`);
+      }
+    } catch (err: any) {
+      Alert.alert("Error", err.message || "Failed to update status");
+    }
+  };
+
+  const handlePaymentUpdate = async (paymentStatus: string) => {
+    if (!selectedBooking) return;
+    try {
+      const res = await bookingApi.updatePayment(selectedBooking.id, { paymentStatus: paymentStatus as any });
+      if (res.success) {
+        setBookings(prev =>
+          prev.map(b => b.id === selectedBooking.id ? { ...b, paymentStatus } : b)
+        );
+        setSelectedBooking(prev => prev ? { ...prev, paymentStatus } : null);
+        Alert.alert("Updated", `Payment status: ${paymentStatus}`);
+      }
+    } catch (err: any) {
+      Alert.alert("Error", err.message || "Failed to update payment");
+    }
+  };
+
+  const renderEmpty = () => (
+    <View style={styles.emptyState}>
+      <View style={styles.emptyIcon}>
+        <Ionicons name="calendar-outline" size={40} color="#c4c9d0" />
+      </View>
+      <Text style={styles.emptyTitle}>No bookings yet</Text>
+      <Text style={styles.emptySub}>
+        {selectedStatus === "All"
+          ? "Your bookings will appear here"
+          : `No ${selectedStatus} bookings`}
+      </Text>
+    </View>
+  );
 
   return (
     <>
       <StatusBar barStyle="dark-content" backgroundColor="#f4f8ff" />
       <SafeAreaView style={styles.container} edges={["top"]}>
-        <LinearGradient
-          colors={["#f4f8ff", "#eef1f9", "#ffffff"]}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 0, y: 1 }}
-          style={{ flex: 1 }}
-        >
-          {/* ── Top Bar ── */}
+        <LinearGradient colors={["#f4f8ff", "#eef1f9", "#ffffff"]} style={{ flex: 1 }}>
+          {/* Top Bar */}
           <View style={styles.topBar}>
-            <TouchableOpacity style={styles.backBtn} activeOpacity={0.7}>
-              <Ionicons name="arrow-back" size={20} color="#101720" />
-            </TouchableOpacity>
-            <Text style={styles.topBarTitle}>Earnings</Text>
-            <TouchableOpacity style={styles.backBtn} activeOpacity={0.7}>
-              <Ionicons name="download-outline" size={20} color="#101720" />
-            </TouchableOpacity>
+            <Text style={styles.topBarTitle}>Bookings</Text>
+            <View style={styles.countBadge}>
+              <Text style={styles.countText}>{totalCount}</Text>
+            </View>
           </View>
 
+          {/* Filter Tabs */}
           <ScrollView
-            showsVerticalScrollIndicator={false}
-            contentContainerStyle={styles.scrollContent}
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            style={styles.filterScroll}
+            contentContainerStyle={styles.filterContent}
           >
-            {/* ── Hero Earnings Card ── */}
-            <View style={styles.heroSection}>
-              <LinearGradient
-                colors={["#0cadab", "#0a9998"]}
-                start={{ x: 0, y: 0 }}
-                end={{ x: 1, y: 1 }}
-                style={styles.earningsCard}
+            {ALL_STATUSES.map(s => (
+              <TouchableOpacity
+                key={s}
+                onPress={() => setSelectedStatus(s)}
+                style={[styles.filterChip, selectedStatus === s && styles.filterChipActive]}
+                activeOpacity={0.8}
               >
-                <View style={styles.earningsHeader}>
-                  <View>
-                    <Text style={styles.earningsLabel}>TOTAL EARNED TODAY</Text>
-                    <Text style={styles.earningsAmount}>
-                      ₹{earningsSummary.today.toLocaleString()}
-                    </Text>
-                  </View>
-                  <View style={styles.earningsIconWrap}>
-                    <Ionicons name="wallet-outline" size={28} color="#fff" />
-                  </View>
-                </View>
-
-                <View style={styles.earningsGrid}>
-                  <View style={styles.earningsItem}>
-                    <Text style={styles.earningsItemLabel}>This Week</Text>
-                    <Text style={styles.earningsItemValue}>
-                      ₹{earningsSummary.thisWeek.toLocaleString()}
-                    </Text>
-                  </View>
-                  <View style={styles.earningsDivider} />
-                  <View style={styles.earningsItem}>
-                    <Text style={styles.earningsItemLabel}>This Month</Text>
-                    <Text style={styles.earningsItemValue}>
-                      ₹{earningsSummary.thisMonth.toLocaleString()}
-                    </Text>
-                  </View>
-                </View>
-
-                <TouchableOpacity style={styles.withdrawButton} activeOpacity={0.88}>
-                  <Text style={styles.withdrawButtonText}>
-                    Withdraw ₹{earningsSummary.pending.toLocaleString()}
-                  </Text>
-                  <Ionicons name="arrow-forward" size={16} color="#0cadab" />
-                </TouchableOpacity>
-              </LinearGradient>
-            </View>
-
-            {/* ── Stat Cards ── */}
-            <View style={styles.statsSection}>
-              <View style={styles.statsGrid}>
-                {statCards.map((s, i) => (
-                  <TouchableOpacity key={i} style={styles.statCard} activeOpacity={0.8}>
-                    <View style={[styles.statIconWrap, { backgroundColor: s.bg }]}>
-                      <Ionicons name={s.icon as any} size={20} color={s.color} />
-                    </View>
-                    <Text style={styles.statValue}>{s.value}</Text>
-                    <Text style={styles.statLabel}>{s.label}</Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-            </View>
-
-            {/* ── Earnings Chart ── */}
-            <View style={styles.chartSection}>
-              <EarningsChart period={period} onChangePeriod={setPeriod} />
-            </View>
-
-            {/* ── Recent Trips ── */}
-            <View style={styles.tripsSection}>
-              <View style={styles.sectionHeader}>
-                <View>
-                  <Text style={styles.sectionTitleLg}>Recent Bookings</Text>
-                  <Text style={styles.sectionSub}>Your earning history</Text>
-                </View>
-                <TouchableOpacity style={styles.seeAllBtn} activeOpacity={0.7}>
-                  <Text style={styles.seeAll}>See All</Text>
-                  <Ionicons name="arrow-forward" size={12} color="#0cadab" />
-                </TouchableOpacity>
-              </View>
-
-              {recentTrips.map((trip) => (
-                <TripRow key={trip.id} trip={trip} />
-              ))}
-            </View>
-
-            {/* ── Payout Info Banner ── */}
-            <View style={styles.payoutBannerSection}>
-              <TouchableOpacity activeOpacity={0.88}>
-                <LinearGradient
-                  colors={["#101720", "#1e2d3d"]}
-                  start={{ x: 0, y: 0 }}
-                  end={{ x: 1, y: 0 }}
-                  style={styles.payoutBanner}
-                >
-                  <View>
-                    <Text style={styles.payoutBannerTitle}>Instant Payouts 💸</Text>
-                    <Text style={styles.payoutBannerSub}>
-                      Link your bank account to withdraw instantly
-                    </Text>
-                  </View>
-                  <View style={styles.payoutArrow}>
-                    <Ionicons name="arrow-forward" size={18} color="#101720" />
-                  </View>
-                </LinearGradient>
+                {s !== "All" && (
+                  <View style={[
+                    styles.filterDot,
+                    { backgroundColor: STATUS_CONFIG[s]?.color || "#8696a0" },
+                    selectedStatus !== s && { opacity: 0.5 }
+                  ]} />
+                )}
+                <Text style={[styles.filterChipText, selectedStatus === s && styles.filterChipTextActive]}>
+                  {s}
+                </Text>
               </TouchableOpacity>
-            </View>
-
-            <View style={styles.bottomSpacing} />
+            ))}
           </ScrollView>
+
+          {/* List */}
+          {loading ? (
+            <View style={styles.loader}>
+              <ActivityIndicator size="large" color="#0cadab" />
+            </View>
+          ) : (
+            <FlatList
+              data={bookings}
+              keyExtractor={item => String(item.id)}
+              renderItem={({ item }) => (
+                <BookingCard
+                  booking={item}
+                  onPress={() => {
+                    setSelectedBooking(item);
+                    setShowDetail(true);
+                  }}
+                />
+              )}
+              ListEmptyComponent={renderEmpty}
+              contentContainerStyle={styles.listContent}
+              onEndReached={() => { if (hasMore && !loading) fetchBookings(); }}
+              onEndReachedThreshold={0.3}
+              refreshControl={
+                <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#0cadab" />
+              }
+              ListFooterComponent={
+                hasMore && bookings.length > 0
+                  ? <ActivityIndicator size="small" color="#0cadab" style={{ marginVertical: 16 }} />
+                  : null
+              }
+            />
+          )}
         </LinearGradient>
       </SafeAreaView>
+
+      <BookingDetailModal
+        visible={showDetail}
+        booking={selectedBooking}
+        onClose={() => setShowDetail(false)}
+        onStatusPress={() => {
+          setShowDetail(false);
+          setShowStatusModal(true);
+        }}
+        onPaymentUpdate={handlePaymentUpdate}
+      />
+
+      <StatusModal
+        visible={showStatusModal}
+        booking={selectedBooking}
+        onClose={() => setShowStatusModal(false)}
+        onUpdate={handleStatusUpdate}
+      />
     </>
   );
 }
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
-
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: "#f4f8ff" },
-  scrollContent: { paddingBottom: 16 },
 
-  // ── Top Bar ─────────────────────────────────────────────────────────────────
   topBar: {
     flexDirection: "row",
-    justifyContent: "space-between",
     alignItems: "center",
     paddingHorizontal: 20,
     paddingVertical: 14,
     borderBottomWidth: 1,
     borderBottomColor: "#eef0f3",
-  },
-  topBarTitle: {
-    fontSize: 22,
-    fontWeight: "800",
-    color: "#101720",
-    letterSpacing: -0.4,
-  },
-  backBtn: {
-    width: 42,
-    height: 42,
-    borderRadius: 14,
-    backgroundColor: "#fff",
-    justifyContent: "center",
-    alignItems: "center",
-    borderWidth: 1,
-    borderColor: "#eef0f3",
-  },
-
-  // ── Hero Earnings Card ───────────────────────────────────────────────────────
-  heroSection: {
-    paddingHorizontal: 20,
-    paddingTop: 20,
-    marginBottom: 20,
-  },
-  earningsCard: {
-    padding: 20,
-    borderRadius: 22,
-    shadowColor: "#0cadab",
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.18,
-    shadowRadius: 14,
-    elevation: 7,
-  },
-  earningsHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "flex-start",
-    marginBottom: 20,
-  },
-  earningsLabel: {
-    fontSize: 11,
-    color: "rgba(255,255,255,0.8)",
-    fontWeight: "700",
-    marginBottom: 6,
-    letterSpacing: 0.8,
-  },
-  earningsAmount: {
-    fontSize: 36,
-    fontWeight: "800",
-    color: "#fff",
-    letterSpacing: -1.2,
-  },
-  earningsIconWrap: {
-    width: 52,
-    height: 52,
-    borderRadius: 16,
-    backgroundColor: "rgba(255,255,255,0.15)",
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  earningsGrid: {
-    flexDirection: "row",
-    alignItems: "center",
-    marginBottom: 18,
-    paddingVertical: 14,
-    borderTopWidth: 1,
-    borderBottomWidth: 1,
-    borderColor: "rgba(255,255,255,0.15)",
-  },
-  earningsItem: { flex: 1 },
-  earningsDivider: {
-    width: 1,
-    height: 36,
-    backgroundColor: "rgba(255,255,255,0.2)",
-  },
-  earningsItemLabel: {
-    fontSize: 11,
-    color: "rgba(255,255,255,0.75)",
-    fontWeight: "600",
-    marginBottom: 5,
-  },
-  earningsItemValue: {
-    fontSize: 20,
-    fontWeight: "800",
-    color: "#fff",
-    letterSpacing: -0.5,
-  },
-  withdrawButton: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "#fff",
-    paddingVertical: 14,
-    borderRadius: 14,
-    gap: 8,
-  },
-  withdrawButtonText: {
-    fontSize: 15,
-    fontWeight: "700",
-    color: "#0cadab",
-  },
-
-  // ── Stat Cards ───────────────────────────────────────────────────────────────
-  statsSection: {
-    paddingHorizontal: 20,
-    marginBottom: 20,
-  },
-  statsGrid: {
-    flexDirection: "row",
-    flexWrap: "wrap",
     gap: 10,
   },
-  statCard: {
-    flex: 1,
-    minWidth: (width - 60) / 2,
-    backgroundColor: "#fff",
-    padding: 16,
-    borderRadius: 18,
-    alignItems: "center",
-    borderWidth: 1,
-    borderColor: "#eef0f3",
+  topBarTitle: { fontSize: 26, fontWeight: "800", color: "#101720", letterSpacing: -0.5, flex: 1 },
+  countBadge: {
+    backgroundColor: "#0cadab",
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
   },
-  statIconWrap: {
-    width: 46,
-    height: 46,
-    borderRadius: 14,
-    justifyContent: "center",
-    alignItems: "center",
-    marginBottom: 10,
-  },
-  statValue: {
-    fontSize: 20,
-    fontWeight: "800",
-    color: "#101720",
-    marginBottom: 2,
-    letterSpacing: -0.5,
-  },
-  statLabel: {
-    fontSize: 11,
-    color: "#8696a0",
-    fontWeight: "600",
-  },
+  countText: { fontSize: 13, fontWeight: "800", color: "#fff" },
 
-  // ── Chart ────────────────────────────────────────────────────────────────────
-  chartSection: {
-    paddingHorizontal: 20,
-    marginBottom: 24,
-  },
-  sectionCard: {
-    backgroundColor: "#fff",
-    borderRadius: 22,
-    padding: 18,
-    borderWidth: 1,
-    borderColor: "#eef0f3",
-  },
-  chartHeader: {
+  filterScroll: { maxHeight: 52 },
+  filterContent: { paddingHorizontal: 20, paddingVertical: 10, gap: 8 },
+  filterChip: {
     flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "flex-start",
-    marginBottom: 20,
-  },
-  sectionTitle: {
-    fontSize: 11,
-    fontWeight: "700",
-    color: "#8696a0",
-    letterSpacing: 0.8,
-    textTransform: "uppercase",
-    marginBottom: 4,
-  },
-  chartTotal: {
-    fontSize: 22,
-    fontWeight: "800",
-    color: "#101720",
-    letterSpacing: -0.6,
-  },
-  pillRow: {
-    flexDirection: "row",
-    gap: 6,
-  },
-  pill: {
+    alignItems: "center",
+    gap: 5,
     paddingHorizontal: 14,
     paddingVertical: 6,
     borderRadius: 20,
-    backgroundColor: "#f4f8ff",
-    borderWidth: 1,
-    borderColor: "#eef0f3",
-  },
-  pillActive: {
-    backgroundColor: "#0cadab",
-    borderColor: "#0cadab",
-  },
-  pillText: {
-    fontSize: 12,
-    fontWeight: "700",
-    color: "#8696a0",
-  },
-  pillTextActive: {
-    color: "#fff",
-  },
-  barsContainer: {
-    flexDirection: "row",
-    alignItems: "flex-end",
-    gap: 8,
-  },
-  barWrapper: {
-    flex: 1,
-    alignItems: "center",
-    gap: 6,
-  },
-  barTrack: {
-    width: "100%",
-    justifyContent: "flex-end",
-  },
-  bar: {
-    width: "100%",
-    borderRadius: 7,
-  },
-  barInactive: {
-    backgroundColor: "#eef0f3",
-  },
-  barLabel: {
-    fontSize: 10,
-    fontWeight: "700",
-    color: "#8696a0",
-  },
-
-  // ── Trips ────────────────────────────────────────────────────────────────────
-  tripsSection: {
-    paddingHorizontal: 20,
-    marginBottom: 20,
-  },
-  sectionHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginBottom: 14,
-  },
-  sectionTitleLg: {
-    fontSize: 20,
-    fontWeight: "800",
-    color: "#101720",
-    letterSpacing: -0.4,
-  },
-  sectionSub: {
-    fontSize: 12,
-    color: "#8696a0",
-    fontWeight: "500",
-    marginTop: 2,
-  },
-  seeAllBtn: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 4,
-  },
-  seeAll: {
-    fontSize: 14,
-    fontWeight: "600",
-    color: "#0cadab",
-  },
-  tripCard: {
-    flexDirection: "row",
-    alignItems: "center",
     backgroundColor: "#fff",
-    borderRadius: 18,
-    padding: 14,
-    marginBottom: 10,
     borderWidth: 1,
     borderColor: "#eef0f3",
-    gap: 12,
   },
-  tripIconWrap: {
-    flexShrink: 0,
+  filterChipActive: { backgroundColor: "#101720", borderColor: "#101720" },
+  filterDot: { width: 7, height: 7, borderRadius: 4 },
+  filterChipText: { fontSize: 12, fontWeight: "700", color: "#8696a0" },
+  filterChipTextActive: { color: "#fff" },
+
+  loader: { flex: 1, justifyContent: "center", alignItems: "center" },
+  listContent: { padding: 16, paddingBottom: 120, gap: 10 },
+
+  card: {
+    backgroundColor: "#fff",
+    borderRadius: 20,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: "#eef0f3",
   },
-  tripIcon: {
-    width: 46,
-    height: 46,
-    borderRadius: 14,
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  tripBody: {
-    flex: 1,
-    gap: 3,
-  },
-  tripTitleRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "flex-start",
-    marginBottom: 2,
-  },
-  tripEventName: {
-    fontSize: 14,
-    fontWeight: "800",
-    color: "#101720",
-    letterSpacing: -0.2,
-    flex: 1,
-    marginRight: 8,
-  },
-  tripFare: {
-    fontSize: 15,
-    fontWeight: "800",
-    color: "#0cadab",
-    letterSpacing: -0.3,
-  },
-  tripMeta: {
+  cardTop: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 },
+  cardTopLeft: { flex: 1 },
+  cardEvent: { fontSize: 16, fontWeight: "800", color: "#101720", letterSpacing: -0.3 },
+  cardId: { fontSize: 12, color: "#8696a0", fontWeight: "500", marginTop: 2 },
+  cardStatus: {
     flexDirection: "row",
     alignItems: "center",
     gap: 4,
-  },
-  tripMetaText: {
-    fontSize: 12,
-    color: "#8696a0",
-    fontWeight: "500",
-    flex: 1,
-  },
-  tripDot: {
-    fontSize: 12,
-    color: "#c4c9d0",
-  },
-  tipBadge: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: "#f0fdf4",
-    paddingHorizontal: 8,
+    paddingHorizontal: 10,
     paddingVertical: 5,
     borderRadius: 10,
     borderWidth: 1,
-    borderColor: "#bbf7d0",
-    flexShrink: 0,
   },
-  tipText: {
-    fontSize: 11,
-    fontWeight: "800",
-    color: "#22c55e",
-  },
-  tipLabel: {
-    fontSize: 10,
-    fontWeight: "600",
-    color: "#22c55e",
-  },
-
-  // ── Payout Banner ────────────────────────────────────────────────────────────
-  payoutBannerSection: {
-    paddingHorizontal: 20,
-    marginBottom: 10,
-  },
-  payoutBanner: {
+  cardStatusText: { fontSize: 11, fontWeight: "800" },
+  cardRow: { flexDirection: "row", alignItems: "center", gap: 7, marginBottom: 5 },
+  cardRowText: { fontSize: 13, color: "#5a6169", fontWeight: "500", flex: 1 },
+  cardPhone: { fontSize: 12, color: "#0cadab", fontWeight: "600" },
+  cardFooter: {
     flexDirection: "row",
-    alignItems: "center",
     justifyContent: "space-between",
-    paddingHorizontal: 20,
-    paddingVertical: 18,
-    borderRadius: 18,
-  },
-  payoutBannerTitle: {
-    fontSize: 15,
-    fontWeight: "800",
-    color: "#fff",
-    marginBottom: 3,
-  },
-  payoutBannerSub: {
-    fontSize: 12,
-    color: "rgba(255,255,255,0.75)",
-    fontWeight: "500",
-  },
-  payoutArrow: {
-    width: 40,
-    height: 40,
-    borderRadius: 13,
-    backgroundColor: "#fff",
-    justifyContent: "center",
     alignItems: "center",
+    marginTop: 10,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: "#f0f0f0",
+  },
+  cardAmountLabel: { fontSize: 9, color: "#8696a0", fontWeight: "700", letterSpacing: 0.5, marginBottom: 2 },
+  cardAmount: { fontSize: 18, fontWeight: "800", color: "#0cadab", letterSpacing: -0.4 },
+  cardFooterRight: { flexDirection: "row", alignItems: "center", gap: 8 },
+  payBadge: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 10 },
+  payBadgeText: { fontSize: 11, fontWeight: "700" },
+
+  emptyState: { alignItems: "center", paddingTop: 60, gap: 10 },
+  emptyIcon: {
+    width: 80, height: 80, borderRadius: 24,
+    backgroundColor: "#f4f8ff", justifyContent: "center", alignItems: "center",
+    borderWidth: 1, borderColor: "#eef0f3", marginBottom: 4,
+  },
+  emptyTitle: { fontSize: 18, fontWeight: "800", color: "#101720", letterSpacing: -0.3 },
+  emptySub: { fontSize: 14, color: "#8696a0", fontWeight: "500", textAlign: "center" },
+});
+
+// ─── Modal Styles ─────────────────────────────────────────────────────────────
+const modalS = StyleSheet.create({
+  overlay: { flex: 1, backgroundColor: "rgba(16,23,32,0.5)", justifyContent: "flex-end" },
+  sheet: { backgroundColor: "#fff", borderTopLeftRadius: 28, borderTopRightRadius: 28, padding: 24, paddingTop: 12 },
+  handle: { width: 40, height: 4, borderRadius: 2, backgroundColor: "#e5e7eb", alignSelf: "center", marginBottom: 20 },
+  title: { fontSize: 20, fontWeight: "800", color: "#101720", marginBottom: 4, letterSpacing: -0.4 },
+  bookingId: { fontSize: 13, color: "#8696a0", fontWeight: "500", marginBottom: 16 },
+  notesInput: {
+    borderWidth: 1, borderColor: "#eef0f3", borderRadius: 14,
+    padding: 14, fontSize: 14, color: "#101720", marginBottom: 16,
+    minHeight: 80, textAlignVertical: "top",
+  },
+  statusGrid: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 16 },
+  statusBtn: {
+    flexDirection: "row", alignItems: "center", gap: 6,
+    paddingHorizontal: 14, paddingVertical: 10,
+    borderRadius: 12, borderWidth: 1, minWidth: (width - 72) / 2,
+  },
+  statusBtnText: { fontSize: 13, fontWeight: "700" },
+  cancelBtn: {
+    backgroundColor: "#f4f8ff", borderRadius: 14, paddingVertical: 14,
+    alignItems: "center", borderWidth: 1, borderColor: "#eef0f3",
+  },
+  cancelBtnText: { fontSize: 15, fontWeight: "700", color: "#8696a0" },
+});
+
+const detailS = StyleSheet.create({
+  overlay: { flex: 1, backgroundColor: "rgba(16,23,32,0.5)", justifyContent: "flex-end" },
+  sheet: {
+    backgroundColor: "#fff", borderTopLeftRadius: 28, borderTopRightRadius: 28,
+    padding: 24, paddingTop: 12, maxHeight: "92%",
+  },
+  handle: { width: 40, height: 4, borderRadius: 2, backgroundColor: "#e5e7eb", alignSelf: "center", marginBottom: 16 },
+  header: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 20 },
+  headerLeft: { flex: 1 },
+  eventType: { fontSize: 22, fontWeight: "800", color: "#101720", letterSpacing: -0.5 },
+  bookingId: { fontSize: 13, color: "#8696a0", fontWeight: "500", marginTop: 3 },
+  statusBadge: {
+    flexDirection: "row", alignItems: "center", gap: 5,
+    paddingHorizontal: 12, paddingVertical: 7, borderRadius: 12, borderWidth: 1,
+  },
+  statusText: { fontSize: 12, fontWeight: "800" },
+
+  section: { marginBottom: 20 },
+  sectionTitle: {
+    fontSize: 11, fontWeight: "700", color: "#8696a0", letterSpacing: 1,
+    textTransform: "uppercase", marginBottom: 10,
   },
 
-  bottomSpacing: { height: 20 },
+  clientCard: {
+    flexDirection: "row", alignItems: "center", gap: 12,
+    backgroundColor: "#f8fafc", borderRadius: 14, padding: 12,
+  },
+  clientAvatar: {
+    width: 42, height: 42, borderRadius: 14,
+    backgroundColor: "#0cadab", justifyContent: "center", alignItems: "center",
+  },
+  clientInitial: { fontSize: 18, fontWeight: "800", color: "#fff" },
+  clientInfo: { flex: 1 },
+  clientName: { fontSize: 15, fontWeight: "700", color: "#101720" },
+  clientPhone: { fontSize: 13, color: "#0cadab", fontWeight: "600", marginTop: 2 },
+  callBtn: {
+    width: 40, height: 40, borderRadius: 12,
+    backgroundColor: "#f0fffe", justifyContent: "center", alignItems: "center",
+    borderWidth: 1, borderColor: "#a5f3fc",
+  },
+
+  row: { flexDirection: "row", alignItems: "flex-start", marginBottom: 8 },
+  rowIcon: { marginRight: 10, marginTop: 1 },
+  rowContent: { flex: 1 },
+  rowLabel: { fontSize: 11, color: "#8696a0", fontWeight: "600", marginBottom: 2 },
+  rowValue: { fontSize: 14, color: "#101720", fontWeight: "600" },
+
+  equipItem: {
+    flexDirection: "row", alignItems: "center", gap: 8,
+    paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: "#f0f0f0",
+  },
+  equipName: { flex: 1, fontSize: 13, color: "#5a6169", fontWeight: "500" },
+  equipPrice: { fontSize: 13, fontWeight: "700", color: "#101720" },
+
+  priceRow: { flexDirection: "row", justifyContent: "space-between", marginBottom: 6 },
+  priceLabel: { fontSize: 13, color: "#8696a0", fontWeight: "500" },
+  priceVal: { fontSize: 13, color: "#101720", fontWeight: "600" },
+  totalRow: {
+    marginTop: 8, paddingTop: 10, borderTopWidth: 1, borderTopColor: "#eef0f3",
+  },
+  totalLabel: { fontSize: 15, color: "#101720", fontWeight: "700" },
+  totalVal: { fontSize: 18, color: "#0cadab", fontWeight: "800", letterSpacing: -0.4 },
+
+  paymentRow: { gap: 10 },
+  payBadge: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 10, alignSelf: "flex-start" },
+  payBadgeText: { fontSize: 13, fontWeight: "700" },
+  payBtns: { flexDirection: "row", gap: 8 },
+  payBtn: {
+    paddingHorizontal: 12, paddingVertical: 8, borderRadius: 10,
+    backgroundColor: "#f4f8ff", borderWidth: 1, borderColor: "#eef0f3",
+  },
+  payBtnActive: { backgroundColor: "#0cadab", borderColor: "#0cadab" },
+  payBtnText: { fontSize: 12, fontWeight: "700", color: "#8696a0" },
+  payBtnTextActive: { color: "#fff" },
+
+  specialReq: {
+    fontSize: 14, color: "#5a6169", fontWeight: "500", lineHeight: 22,
+    backgroundColor: "#f8fafc", borderRadius: 12, padding: 12,
+  },
+
+  actions: { gap: 10, marginTop: 8, paddingBottom: 20 },
+  updateBtn: { borderRadius: 16, overflow: "hidden" },
+  updateBtnGrad: {
+    flexDirection: "row", alignItems: "center", justifyContent: "center",
+    gap: 8, paddingVertical: 14,
+  },
+  updateBtnText: { fontSize: 15, fontWeight: "700", color: "#fff" },
+  closeBtn: {
+    backgroundColor: "#f4f8ff", borderRadius: 16, paddingVertical: 14,
+    alignItems: "center", borderWidth: 1, borderColor: "#eef0f3",
+  },
+  closeBtnText: { fontSize: 15, fontWeight: "700", color: "#8696a0" },
 });
