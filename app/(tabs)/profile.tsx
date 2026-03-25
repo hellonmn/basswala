@@ -1,24 +1,9 @@
-/**
- * profile.tsx — Fully functional profile screen
- *
- * Features:
- *  - Real booking stats fetched + counted from API
- *  - Skeleton loader while stats load
- *  - Navigation to Edit Profile, Change Password, Saved DJs, Bookings
- *  - Linking for Help, Contact, Terms, Privacy
- *  - Logout confirmation modal with spring animation
- *  - Success toast shown after returning from Edit Profile
- */
-
 import { Ionicons } from "@expo/vector-icons";
 import { LinearGradient } from "expo-linear-gradient";
-import { useRouter, useFocusEffect, useLocalSearchParams } from "expo-router";
-import React, { useRef, useState, useCallback, useEffect } from "react";
+import { useRouter } from "expo-router";
+import React, { useRef, useState } from "react";
 import {
   Animated,
-  Dimensions,
-  Easing,
-  Linking,
   Modal,
   ScrollView,
   StatusBar,
@@ -29,476 +14,304 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useAuth } from "../../context/AuthContext";
-import { apiService } from "../../services/api";
-
-const { width } = Dimensions.get("window");
-
-// ─── Success Toast ────────────────────────────────────────────────────────────
-
-function SuccessToast({ visible }: { visible: boolean }) {
-  const translateY = useRef(new Animated.Value(-80)).current;
-  const opacity = useRef(new Animated.Value(0)).current;
-
-  useEffect(() => {
-    if (visible) {
-      Animated.parallel([
-        Animated.spring(translateY, {
-          toValue: 0,
-          useNativeDriver: true,
-          tension: 120,
-          friction: 10,
-        }),
-        Animated.timing(opacity, {
-          toValue: 1,
-          duration: 200,
-          useNativeDriver: true,
-        }),
-      ]).start();
-    } else {
-      Animated.parallel([
-        Animated.timing(translateY, {
-          toValue: -80,
-          duration: 280,
-          easing: Easing.in(Easing.ease),
-          useNativeDriver: true,
-        }),
-        Animated.timing(opacity, {
-          toValue: 0,
-          duration: 280,
-          useNativeDriver: true,
-        }),
-      ]).start();
-    }
-  }, [visible]);
-
-  return (
-    <Animated.View
-      style={[ts.toast, { transform: [{ translateY }], opacity }]}
-      pointerEvents="none"
-    >
-      <View style={ts.iconCircle}>
-        <Ionicons name="checkmark-circle" size={20} color="#16a34a" />
-      </View>
-      <Text style={ts.toastText}>Profile saved successfully!</Text>
-    </Animated.View>
-  );
-}
-
-// ─── Skeleton pulse ───────────────────────────────────────────────────────────
-
-function Skel({ w, h, r = 8 }: { w: number | string; h: number; r?: number }) {
-  const anim = useRef(new Animated.Value(0)).current;
-  React.useEffect(() => {
-    const loop = Animated.loop(Animated.sequence([
-      Animated.timing(anim, { toValue: 1, duration: 850, easing: Easing.inOut(Easing.ease), useNativeDriver: true }),
-      Animated.timing(anim, { toValue: 0, duration: 850, easing: Easing.inOut(Easing.ease), useNativeDriver: true }),
-    ]));
-    loop.start();
-    return () => loop.stop();
-  }, []);
-  return (
-    <Animated.View style={{
-      width: w as any, height: h, borderRadius: r, backgroundColor: "#e5e7eb",
-      opacity: anim.interpolate({ inputRange: [0, 1], outputRange: [0.3, 0.7] }),
-    }} />
-  );
-}
 
 // ─── Logout Modal ─────────────────────────────────────────────────────────────
+const LogoutModal = ({
+  visible,
+  onClose,
+  onConfirm,
+}: {
+  visible: boolean;
+  onClose: () => void;
+  onConfirm: () => void;
+}) => {
+  const scaleValue = useRef(new Animated.Value(0)).current;
 
-function LogoutModal({ visible, onClose, onConfirm }: {
-  visible: boolean; onClose: () => void; onConfirm: () => void;
-}) {
-  const scale = useRef(new Animated.Value(0)).current;
   React.useEffect(() => {
-    Animated.spring(scale, { toValue: visible ? 1 : 0, useNativeDriver: true, tension: 100, friction: 8 }).start();
+    Animated.spring(scaleValue, {
+      toValue: visible ? 1 : 0,
+      useNativeDriver: true,
+      tension: 100,
+      friction: 8,
+    }).start();
   }, [visible]);
+
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
-      <View style={ms.overlay}>
-        <Animated.View style={[ms.modal, { transform: [{ scale }] }]}>
-          <View style={ms.iconCircle}>
+      <View style={modalS.overlay}>
+        <Animated.View style={[modalS.modal, { transform: [{ scale: scaleValue }] }]}>
+          <View style={modalS.iconCircle}>
             <Ionicons name="log-out-outline" size={30} color="#ef4444" />
           </View>
-          <Text style={ms.title}>Sign Out?</Text>
-          <Text style={ms.message}>You'll need to sign in again to access your account.</Text>
-          <View style={ms.btnRow}>
-            <TouchableOpacity style={ms.cancelBtn} onPress={onClose} activeOpacity={0.8}>
-              <Text style={ms.cancelText}>Cancel</Text>
+          <Text style={modalS.title}>Sign Out?</Text>
+          <Text style={modalS.message}>You'll need to sign in again to access your captain dashboard.</Text>
+          <View style={modalS.buttonRow}>
+            <TouchableOpacity style={modalS.cancelBtn} onPress={onClose} activeOpacity={0.8}>
+              <Text style={modalS.cancelBtnText}>Cancel</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={ms.confirmBtn} onPress={onConfirm} activeOpacity={0.8}>
-              <Text style={ms.confirmText}>Sign Out</Text>
+            <TouchableOpacity style={modalS.confirmBtn} onPress={onConfirm} activeOpacity={0.8}>
+              <Text style={modalS.confirmBtnText}>Sign Out</Text>
             </TouchableOpacity>
           </View>
         </Animated.View>
       </View>
     </Modal>
   );
-}
+};
 
-// ─── Stat card ────────────────────────────────────────────────────────────────
-
-function StatCard({ icon, value, label, color = "#0cadab" }: {
-  icon: string; value: string | number; label: string; color?: string;
-}) {
-  return (
-    <View style={s.statCard}>
-      <Ionicons name={icon as any} size={18} color={color} />
-      <Text style={s.statValue}>{value}</Text>
-      <Text style={s.statLabel}>{label}</Text>
+const MenuRow = ({
+  icon, label, sublabel = null, onPress, danger = false, rightEl = null, accentColor = null,
+}: {
+  icon: string; label: string; sublabel?: string | null;
+  onPress: () => void; danger?: boolean;
+  rightEl?: React.ReactNode; accentColor?: string | null;
+}) => (
+  <TouchableOpacity style={styles.menuRow} onPress={onPress} activeOpacity={0.75}>
+    <View style={[styles.menuIcon, danger && styles.menuIconDanger, accentColor ? { backgroundColor: "#f0fffe" } : null]}>
+      <Ionicons name={icon as any} size={20} color={danger ? "#ef4444" : accentColor ?? "#101720"} />
     </View>
-  );
-}
-
-// ─── Menu row ─────────────────────────────────────────────────────────────────
-
-function MenuRow({ icon, label, sublabel, onPress, danger = false, badge, toggle }: {
-  icon: string; label: string; sublabel?: string; onPress: () => void;
-  danger?: boolean; badge?: number; toggle?: boolean;
-}) {
-  return (
-    <TouchableOpacity style={s.menuRow} onPress={onPress} activeOpacity={0.72}>
-      <View style={[s.menuIcon, danger && s.menuIconDanger]}>
-        <Ionicons name={icon as any} size={20} color={danger ? "#ef4444" : "#101720"} />
-      </View>
-      <View style={s.menuText}>
-        <Text style={[s.menuLabel, danger && { color: "#ef4444" }]}>{label}</Text>
-        {sublabel ? <Text style={s.menuSub}>{sublabel}</Text> : null}
-      </View>
-      {badge !== undefined && badge > 0
-        ? <View style={s.badge}><Text style={s.badgeText}>{badge}</Text></View>
-        : toggle
-          ? <View style={s.toggleTrack}><View style={s.toggleThumb} /></View>
-          : <Ionicons name="chevron-forward" size={18} color={danger ? "#fca5a5" : "#c4c9d0"} />
-      }
-    </TouchableOpacity>
-  );
-}
-
-// ─── Section card ─────────────────────────────────────────────────────────────
-
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <View style={s.section}>
-      <Text style={s.sectionTitle}>{title}</Text>
-      <View style={s.sectionCard}>{children}</View>
+    <View style={styles.menuTextBlock}>
+      <Text style={[styles.menuLabel, danger && styles.menuLabelDanger]}>{label}</Text>
+      {sublabel ? <Text style={styles.menuSublabel}>{sublabel}</Text> : null}
     </View>
-  );
-}
+    {rightEl || <Ionicons name="chevron-forward" size={18} color={danger ? "#ef4444" : "#c4c9d0"} />}
+  </TouchableOpacity>
+);
 
-const Divider = () => <View style={s.rowDivider} />;
-
-// ─── Main screen ──────────────────────────────────────────────────────────────
-
-interface Stats { total: number; active: number; completed: number; cancelled: number; }
+const SectionCard = ({ title, children }: { title: string; children: React.ReactNode }) => (
+  <View style={styles.sectionCard}>
+    <Text style={styles.sectionLabel}>{title}</Text>
+    {children}
+  </View>
+);
 
 export default function ProfileScreen() {
   const { user, logout } = useAuth();
   const router = useRouter();
-  const params = useLocalSearchParams<{ saved?: string }>();
-
   const [showLogout, setShowLogout] = useState(false);
-  const [stats, setStats] = useState<Stats>({ total: 0, active: 0, completed: 0, cancelled: 0 });
-  const [loadingStats, setLoadingStats] = useState(true);
-  const [showToast, setShowToast] = useState(false);
 
-  // Show toast when returning from edit with ?saved=1
-  useEffect(() => {
-    if (params.saved === "1") {
-      setShowToast(true);
-      const t = setTimeout(() => setShowToast(false), 3000);
-      return () => clearTimeout(t);
-    }
-  }, [params.saved]);
+  const firstName = user?.firstName || "Captain";
+  const lastName = user?.lastName || "";
+  const initials = `${firstName[0] || "C"}${lastName[0] || ""}`.toUpperCase();
+  const captain = user?.captainProfile;
 
-  const loadStats = useCallback(async () => {
-    setLoadingStats(true);
-    try {
-      const profileRes = await apiService.getProfile().catch(() => null);
-      const pd = profileRes?.data ?? profileRes;
-      if (pd?.bookingStats) {
-        const b = pd.bookingStats;
-        setStats({
-          total:     b.totalBookings     ?? b.total     ?? 0,
-          active:    b.pendingBookings   ?? b.active    ?? b.confirmed ?? 0,
-          completed: b.completedBookings ?? b.completed ?? 0,
-          cancelled: b.cancelledBookings ?? b.cancelled ?? 0,
-        });
-      } else {
-        const bkRes = await apiService.getMyBookings();
-        const list: any[] = Array.isArray(bkRes?.data ?? bkRes) ? (bkRes?.data ?? bkRes) : [];
-        const norm = (s: string) => (s ?? "").toLowerCase().trim();
-        setStats({
-          total:     list.length,
-          active:    list.filter(b => ["pending","confirmed","in progress","active"].includes(norm(b.status))).length,
-          completed: list.filter(b => norm(b.status) === "completed").length,
-          cancelled: list.filter(b => ["cancelled","canceled"].includes(norm(b.status))).length,
-        });
-      }
-    } catch { /* silently fail */ }
-    finally { setLoadingStats(false); }
-  }, []);
-
-  useFocusEffect(useCallback(() => { loadStats(); }, [loadStats]));
-
-  const displayName = user?.firstName && user?.lastName
-    ? `${user.firstName} ${user.lastName}`
-    : user?.name ?? "User";
-
-  const initials = displayName.split(" ").map((n: string) => n[0]).join("").toUpperCase().slice(0, 2);
-
-  const memberSince = user?.createdAt
-    ? new Date(user.createdAt).toLocaleDateString("en-IN", { month: "long", year: "numeric" })
-    : null;
+  const handleLogout = async () => {
+    setShowLogout(false);
+    await logout();
+    router.replace("/(auth)/login" as any);
+  };
 
   return (
     <>
       <StatusBar barStyle="dark-content" backgroundColor="#f4f8ff" />
-      <SafeAreaView style={s.root} edges={["top"]}>
-        <LinearGradient colors={["#f4f8ff","#eef1f9","#ffffff"]} style={{ flex: 1 }}>
-
-          {/* Success Toast — absolutely positioned above everything */}
-          <SuccessToast visible={showToast} />
-
-          {/* Header */}
-          <View style={s.header}>
-            <Text style={s.headerTitle}>Profile</Text>
-            <TouchableOpacity style={s.settingsBtn}
-              onPress={() => router.push("/profile/edit" as any)}>
-              <Ionicons name="settings-outline" size={22} color="#101720" />
+      <SafeAreaView style={styles.container} edges={["top"]}>
+        <LinearGradient colors={["#f4f8ff", "#eef1f9", "#ffffff"]} style={{ flex: 1 }}>
+          <View style={styles.topBar}>
+            <Text style={styles.topBarTitle}>Profile</Text>
+            <TouchableOpacity style={styles.iconBtn}>
+              <Ionicons name="settings-outline" size={20} color="#101720" />
             </TouchableOpacity>
           </View>
 
-          <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 48 }}>
-
-            {/* Avatar hero */}
-            <View style={s.hero}>
-              <LinearGradient colors={["#0cadab","#0a9998"]} style={s.avatarCircle}>
-                <Text style={s.avatarText}>{initials}</Text>
-              </LinearGradient>
-              <View style={s.onlineDot} />
-              <Text style={s.heroName}>{displayName}</Text>
-              <Text style={s.heroEmail}>{user?.email ?? ""}</Text>
-
-              <View style={s.badgesRow}>
-                {user?.isEmailVerified && (
-                  <View style={s.verifiedBadge}>
-                    <Ionicons name="checkmark-circle" size={13} color="#0cadab" />
-                    <Text style={s.verifiedText}>Verified</Text>
+          <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
+            {/* ── Avatar ── */}
+            <View style={styles.avatarSection}>
+              <View style={styles.avatarOuter}>
+                <LinearGradient colors={["#0cadab", "#0a9998"]} style={styles.avatarCircle}>
+                  <Text style={styles.avatarInitials}>{initials}</Text>
+                </LinearGradient>
+                {captain?.isVerified ? (
+                  <View style={styles.verifiedDot}>
+                    <Ionicons name="checkmark" size={10} color="#fff" />
                   </View>
-                )}
-                {user?.locationCity && (
-                  <View style={s.locationBadge}>
-                    <Ionicons name="location-outline" size={13} color="#8696a0" />
-                    <Text style={s.locationBadgeText}>
-                      {[user.locationCity, user.locationState].filter(Boolean).join(", ")}
-                    </Text>
-                  </View>
-                )}
+                ) : null}
               </View>
 
-              <TouchableOpacity style={s.editBtn} activeOpacity={0.8}
-                onPress={() => router.push("/profile/edit" as any)}>
+              <Text style={styles.captainName}>{firstName} {lastName}</Text>
+              <Text style={styles.captainRole}>
+                {captain?.businessName || "DJ & Sound Captain"}
+              </Text>
+
+              <View style={styles.metaRow}>
+                {captain?.locationCity ? (
+                  <View style={styles.metaChip}>
+                    <Ionicons name="location-outline" size={13} color="#8696a0" />
+                    <Text style={styles.metaChipText}>{captain.locationCity}</Text>
+                  </View>
+                ) : null}
+                {captain?.isVerified ? (
+                  <View style={[styles.metaChip, styles.verifiedChip]}>
+                    <Ionicons name="shield-checkmark-outline" size={13} color="#0cadab" />
+                    <Text style={[styles.metaChipText, { color: "#0cadab" }]}>Verified</Text>
+                  </View>
+                ) : null}
+              </View>
+
+              <TouchableOpacity style={styles.editBtn} activeOpacity={0.8}>
                 <Ionicons name="pencil-outline" size={15} color="#101720" />
-                <Text style={s.editBtnText}>Edit Profile</Text>
+                <Text style={styles.editBtnText}>Edit Profile</Text>
               </TouchableOpacity>
             </View>
 
-            {/* Stats */}
-            {loadingStats ? (
-              <View style={s.statsRow}>
-                {[1,2,3,4].map((_, i, arr) => (
-                  <React.Fragment key={i}>
-                    <View style={s.statCard}>
-                      <Skel w={22} h={22} r={6} />
-                      <Skel w={30} h={18} r={5} />
-                      <Skel w={46} h={11} r={4} />
-                    </View>
-                    {i < arr.length - 1 && <View style={s.statDivider} />}
-                  </React.Fragment>
-                ))}
-              </View>
-            ) : (
-              <View style={s.statsRow}>
-                <StatCard icon="calendar-outline"         value={stats.total}     label="Bookings" />
-                <View style={s.statDivider} />
-                <StatCard icon="time-outline"             value={stats.active}    label="Active"    color="#f59e0b" />
-                <View style={s.statDivider} />
-                <StatCard icon="checkmark-circle-outline" value={stats.completed} label="Done"      color="#22c55e" />
-                <View style={s.statDivider} />
-                <StatCard icon="close-circle-outline"     value={stats.cancelled} label="Cancelled" color="#ef4444" />
-              </View>
-            )}
+            {/* ── Quick Nav ── */}
+            <View style={styles.navSection}>
+              {[
+                { icon: "calendar-outline", label: "Bookings", route: "/bookings", color: "#0cadab", bg: "#f0fffe" },
+                { icon: "musical-notes-outline", label: "My DJs", route: "/djs", color: "#6366f1", bg: "#eef2ff" },
+                { icon: "hardware-chip-outline", label: "Equipment", route: "/equipment", color: "#f59e0b", bg: "#fffbeb" },
+              ].map((item, i) => (
+                <TouchableOpacity
+                  key={i}
+                  style={styles.navCard}
+                  onPress={() => router.push(item.route as any)}
+                  activeOpacity={0.8}
+                >
+                  <View style={[styles.navIcon, { backgroundColor: item.bg }]}>
+                    <Ionicons name={item.icon as any} size={22} color={item.color} />
+                  </View>
+                  <Text style={styles.navLabel}>{item.label}</Text>
+                  <Ionicons name="chevron-forward" size={16} color="#c4c9d0" />
+                </TouchableOpacity>
+              ))}
+            </View>
 
-            {/* Account — Account Type removed */}
-            <Section title="Account">
-              <MenuRow icon="person-outline" label="Full Name" sublabel={displayName}
-                onPress={() => router.push("/profile/edit" as any)} />
-              <Divider />
-              <MenuRow icon="mail-outline" label="Email" sublabel={user?.email ?? "—"}
-                onPress={() => router.push("/profile/edit" as any)} />
-              <Divider />
-              <MenuRow icon="call-outline" label="Phone"
-                sublabel={user?.phone ?? "Add phone number"}
-                onPress={() => router.push("/profile/edit" as any)} />
-              <Divider />
-              <MenuRow icon="lock-closed-outline" label="Change Password"
-                onPress={() => router.push("/profile/change-password" as any)} />
-            </Section>
+            {/* ── Account Info ── */}
+            <SectionCard title="Account">
+              <MenuRow icon="person-outline" label="Full Name" sublabel={`${firstName} ${lastName}`} onPress={() => {}} />
+              <MenuRow icon="mail-outline" label="Email" sublabel={user?.email} onPress={() => {}} />
+              <MenuRow icon="call-outline" label="Phone" sublabel={user?.phone || captain?.phone} onPress={() => {}} />
+              <MenuRow icon="briefcase-outline" label="Business Name" sublabel={captain?.businessName || "Not set"} onPress={() => {}} />
+              {captain?.serviceRadiusKm ? (
+                <MenuRow icon="navigate-outline" label="Service Radius" sublabel={`${captain.serviceRadiusKm} km`} onPress={() => {}} />
+              ) : null}
+            </SectionCard>
 
-            {/* Bookings — Booking History removed */}
-            <Section title="Bookings">
-              <MenuRow icon="calendar-outline" label="My Bookings"
-                badge={stats.active}
-                onPress={() => router.push("/(tabs)/bookings" as any)} />
-              <Divider />
-              <MenuRow icon="heart-outline" label="Saved DJs"
-                onPress={() => router.push("/profile/saved-djs" as any)} />
-            </Section>
+            {/* ── Support ── */}
+            <SectionCard title="Support">
+              <MenuRow icon="help-circle-outline" label="Help Centre" onPress={() => {}} />
+              <MenuRow icon="chatbubble-outline" label="Contact Support" onPress={() => {}} />
+              <MenuRow icon="document-text-outline" label="Terms of Service" onPress={() => {}} />
+              <MenuRow icon="shield-checkmark-outline" label="Privacy Policy" onPress={() => {}} />
+            </SectionCard>
 
-            {/* Payments */}
-            <Section title="Payments">
-              <MenuRow icon="wallet-outline" label="Basswala Wallet"
-                sublabel="Balance · Transactions · Top-up"
-                onPress={() => router.push("/wallet" as any)} />
-              <Divider />
-              <MenuRow icon="refresh-circle-outline" label="Refunds"
-                sublabel="Request or track a refund"
-                onPress={() => router.push("/wallet/refund" as any)} />
-            </Section>
+            <Text style={styles.versionText}>Basswala Captain v1.0</Text>
 
-            {/* Preferences */}
-            <Section title="Preferences">
-              <MenuRow icon="location-outline" label="Location"
-                sublabel={user?.locationCity
-                  ? [user.locationCity, user.locationState].filter(Boolean).join(", ")
-                  : "Set your location"}
-                onPress={() => router.push("/profile/edit" as any)} />
-              <Divider />
-              <MenuRow icon="notifications-outline" label="Notifications" onPress={() => {}} />
-              <Divider />
-              <MenuRow icon="moon-outline" label="Dark Mode" toggle onPress={() => {}} />
-            </Section>
-
-            {/* DJ banner */}
-            <TouchableOpacity style={s.djBanner} activeOpacity={0.88}>
-              <LinearGradient colors={["#0cadab","#0a9998"]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }} style={s.djBannerInner}>
-                <View style={{ flex: 1 }}>
-                  <Text style={s.djBannerTitle}>List Your DJ Services 🎛️</Text>
-                  <Text style={s.djBannerSub}>Earn money by performing at events</Text>
-                </View>
-                <View style={s.djBannerArrow}>
-                  <Ionicons name="arrow-forward" size={18} color="#0cadab" />
-                </View>
-              </LinearGradient>
-            </TouchableOpacity>
-
-            {/* Support */}
-            <Section title="Support">
-              <MenuRow icon="help-circle-outline"       label="Help Centre"
-                onPress={() => router.push("/profile/help-center" as any)} />
-              <Divider />
-              <MenuRow icon="chatbubble-outline"        label="Contact Us"
-                onPress={() => router.push("/profile/contact-us" as any)} />
-              <Divider />
-              <MenuRow icon="document-text-outline"    label="Terms of Service"
-                onPress={() => Linking.openURL("https://basswala.in/terms").catch(() => {})} />
-              <Divider />
-              <MenuRow icon="shield-checkmark-outline" label="Privacy Policy"
-                onPress={() => router.push("/profile/privacy-policy" as any)} />
-            </Section>
-
-            {memberSince && (
-              <Text style={s.memberSince}>Member since {memberSince}</Text>
-            )}
-
-            <TouchableOpacity style={s.logoutBtn} onPress={() => setShowLogout(true)} activeOpacity={0.85}>
+            <TouchableOpacity
+              style={styles.logoutBtn}
+              onPress={() => setShowLogout(true)}
+              activeOpacity={0.85}
+            >
               <Ionicons name="log-out-outline" size={18} color="#ef4444" />
-              <Text style={s.logoutText}>Sign Out</Text>
+              <Text style={styles.logoutBtnText}>Sign Out</Text>
             </TouchableOpacity>
 
-            <Text style={s.version}>Basswala v1.0.0</Text>
+            <View style={{ height: 40 }} />
           </ScrollView>
         </LinearGradient>
       </SafeAreaView>
 
-      <LogoutModal
-        visible={showLogout}
-        onClose={() => setShowLogout(false)}
-        onConfirm={async () => { setShowLogout(false); await logout(); }}
-      />
+      <LogoutModal visible={showLogout} onClose={() => setShowLogout(false)} onConfirm={handleLogout} />
     </>
   );
 }
 
-const s = StyleSheet.create({
-  root:             { flex: 1, backgroundColor: "#f4f8ff" },
-  header:           { flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingHorizontal: 20, paddingVertical: 14 },
-  headerTitle:      { fontSize: 22, fontWeight: "800", color: "#101720", letterSpacing: -0.4 },
-  settingsBtn:      { width: 42, height: 42, borderRadius: 14, backgroundColor: "#fff", justifyContent: "center", alignItems: "center", borderWidth: 1, borderColor: "#eef0f3" },
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: "#f4f8ff" },
+  scrollContent: { paddingBottom: 16 },
+  topBar: {
+    flexDirection: "row", justifyContent: "space-between", alignItems: "center",
+    paddingHorizontal: 20, paddingVertical: 14,
+    borderBottomWidth: 1, borderBottomColor: "#eef0f3",
+  },
+  topBarTitle: { fontSize: 26, fontWeight: "800", color: "#101720", letterSpacing: -0.5 },
+  iconBtn: {
+    width: 42, height: 42, borderRadius: 14, backgroundColor: "#fff",
+    justifyContent: "center", alignItems: "center", borderWidth: 1, borderColor: "#eef0f3",
+  },
 
-  hero:             { alignItems: "center", paddingTop: 8, paddingBottom: 24, position: "relative" },
-  avatarCircle:     { width: 96, height: 96, borderRadius: 32, justifyContent: "center", alignItems: "center", marginBottom: 14 },
-  avatarText:       { fontSize: 36, fontWeight: "800", color: "#fff", letterSpacing: -1 },
-  onlineDot:        { position: "absolute", top: 74, right: width / 2 - 52, width: 14, height: 14, borderRadius: 7, backgroundColor: "#22c55e", borderWidth: 2.5, borderColor: "#f4f8ff" },
-  heroName:         { fontSize: 22, fontWeight: "800", color: "#101720", letterSpacing: -0.4, marginBottom: 4 },
-  heroEmail:        { fontSize: 14, color: "#8696a0", fontWeight: "500", marginBottom: 12 },
-  badgesRow:        { flexDirection: "row", gap: 8, marginBottom: 16 },
-  verifiedBadge:    { flexDirection: "row", alignItems: "center", gap: 4, backgroundColor: "#f0fafa", borderRadius: 20, paddingHorizontal: 10, paddingVertical: 5, borderWidth: 1, borderColor: "#d0f0ef" },
-  verifiedText:     { fontSize: 11, fontWeight: "700", color: "#0cadab" },
-  locationBadge:    { flexDirection: "row", alignItems: "center", gap: 4, backgroundColor: "#f4f8ff", borderRadius: 20, paddingHorizontal: 10, paddingVertical: 5, borderWidth: 1, borderColor: "#eef0f3" },
-  locationBadgeText:{ fontSize: 11, fontWeight: "600", color: "#8696a0" },
-  editBtn:          { flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: "#fff", borderRadius: 14, paddingHorizontal: 20, paddingVertical: 11, borderWidth: 1, borderColor: "#eef0f3" },
-  editBtnText:      { fontSize: 13, fontWeight: "700", color: "#101720" },
+  avatarSection: { alignItems: "center", paddingTop: 28, paddingBottom: 24, paddingHorizontal: 20 },
+  avatarOuter: { position: "relative", marginBottom: 14 },
+  avatarCircle: { width: 96, height: 96, borderRadius: 32, justifyContent: "center", alignItems: "center" },
+  avatarInitials: { fontSize: 36, fontWeight: "800", color: "#fff", letterSpacing: -1 },
+  verifiedDot: {
+    position: "absolute", bottom: -2, right: -2,
+    width: 24, height: 24, borderRadius: 8, backgroundColor: "#0cadab",
+    justifyContent: "center", alignItems: "center",
+    borderWidth: 2.5, borderColor: "#f4f8ff",
+  },
+  captainName: { fontSize: 24, fontWeight: "800", color: "#101720", letterSpacing: -0.5, marginBottom: 4 },
+  captainRole: { fontSize: 14, color: "#8696a0", fontWeight: "600", marginBottom: 12 },
+  metaRow: { flexDirection: "row", gap: 8, marginBottom: 18 },
+  metaChip: {
+    flexDirection: "row", alignItems: "center", gap: 4, backgroundColor: "#fff",
+    borderRadius: 20, paddingHorizontal: 12, paddingVertical: 6,
+    borderWidth: 1, borderColor: "#eef0f3",
+  },
+  verifiedChip: { borderColor: "#a5f3fc", backgroundColor: "#f0fffe" },
+  metaChipText: { fontSize: 12, fontWeight: "600", color: "#5a6169" },
+  editBtn: {
+    flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: "#fff",
+    borderRadius: 14, paddingHorizontal: 20, paddingVertical: 10,
+    borderWidth: 1, borderColor: "#eef0f3",
+  },
+  editBtnText: { fontSize: 13, fontWeight: "700", color: "#101720" },
 
-  statsRow:         { flexDirection: "row", marginHorizontal: 20, backgroundColor: "#fff", borderRadius: 20, padding: 16, marginBottom: 20, borderWidth: 1, borderColor: "#eef0f3", alignItems: "center" },
-  statCard:         { flex: 1, alignItems: "center", gap: 4 },
-  statDivider:      { width: 1, height: 36, backgroundColor: "#eef0f3" },
-  statValue:        { fontSize: 17, fontWeight: "800", color: "#101720" },
-  statLabel:        { fontSize: 10, color: "#8696a0", fontWeight: "600" },
+  navSection: { paddingHorizontal: 20, marginBottom: 16, gap: 8 },
+  navCard: {
+    flexDirection: "row", alignItems: "center", gap: 12,
+    backgroundColor: "#fff", borderRadius: 16, padding: 14,
+    borderWidth: 1, borderColor: "#eef0f3",
+  },
+  navIcon: { width: 44, height: 44, borderRadius: 14, justifyContent: "center", alignItems: "center" },
+  navLabel: { flex: 1, fontSize: 15, fontWeight: "700", color: "#101720" },
 
-  section:          { marginHorizontal: 20, marginBottom: 16 },
-  sectionTitle:     { fontSize: 11, fontWeight: "700", color: "#8696a0", letterSpacing: 0.8, textTransform: "uppercase", marginBottom: 8, paddingLeft: 4 },
-  sectionCard:      { backgroundColor: "#fff", borderRadius: 20, borderWidth: 1, borderColor: "#eef0f3", overflow: "hidden" },
-  menuRow:          { flexDirection: "row", alignItems: "center", paddingHorizontal: 16, paddingVertical: 13, gap: 12 },
-  menuIcon:         { width: 40, height: 40, borderRadius: 13, backgroundColor: "#f4f8ff", justifyContent: "center", alignItems: "center" },
-  menuIconDanger:   { backgroundColor: "#fef2f2" },
-  menuText:         { flex: 1 },
-  menuLabel:        { fontSize: 15, fontWeight: "600", color: "#101720" },
-  menuSub:          { fontSize: 12, color: "#8696a0", fontWeight: "500", marginTop: 1 },
-  badge:            { backgroundColor: "#0cadab", borderRadius: 10, paddingHorizontal: 8, paddingVertical: 2, minWidth: 22, alignItems: "center" },
-  badgeText:        { fontSize: 11, fontWeight: "800", color: "#fff" },
-  toggleTrack:      { width: 44, height: 26, borderRadius: 13, backgroundColor: "#e5e7eb", justifyContent: "center", paddingHorizontal: 3 },
-  toggleThumb:      { width: 20, height: 20, borderRadius: 10, backgroundColor: "#fff" },
-  rowDivider:       { height: 1, backgroundColor: "#f3f4f6", marginHorizontal: 16 },
+  sectionCard: {
+    marginHorizontal: 20, backgroundColor: "#fff", borderRadius: 20,
+    padding: 6, marginBottom: 16, borderWidth: 1, borderColor: "#eef0f3",
+  },
+  sectionLabel: {
+    fontSize: 11, fontWeight: "700", color: "#8696a0", letterSpacing: 0.8,
+    paddingHorizontal: 14, paddingTop: 12, paddingBottom: 4, textTransform: "uppercase",
+  },
+  menuRow: {
+    flexDirection: "row", alignItems: "center",
+    paddingHorizontal: 12, paddingVertical: 12, gap: 12, borderRadius: 14,
+  },
+  menuIcon: { width: 40, height: 40, borderRadius: 13, backgroundColor: "#f4f8ff", justifyContent: "center", alignItems: "center" },
+  menuIconDanger: { backgroundColor: "#fef2f2" },
+  menuTextBlock: { flex: 1 },
+  menuLabel: { fontSize: 15, fontWeight: "600", color: "#101720" },
+  menuLabelDanger: { color: "#ef4444" },
+  menuSublabel: { fontSize: 12, color: "#8696a0", fontWeight: "500", marginTop: 1 },
 
-  djBanner:         { marginHorizontal: 20, marginBottom: 16, borderRadius: 18, overflow: "hidden" },
-  djBannerInner:    { flexDirection: "row", alignItems: "center", paddingHorizontal: 20, paddingVertical: 18, gap: 16 },
-  djBannerTitle:    { fontSize: 15, fontWeight: "800", color: "#fff", marginBottom: 3 },
-  djBannerSub:      { fontSize: 12, color: "rgba(255,255,255,0.82)", fontWeight: "500" },
-  djBannerArrow:    { width: 40, height: 40, borderRadius: 13, backgroundColor: "#fff", justifyContent: "center", alignItems: "center" },
-
-  memberSince:      { textAlign: "center", fontSize: 12, color: "#c4c9d0", fontWeight: "500", marginBottom: 14, marginTop: 4 },
-  logoutBtn:        { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, marginHorizontal: 20, paddingVertical: 16, borderRadius: 18, borderWidth: 1.5, borderColor: "#fecaca", backgroundColor: "#fff5f5", marginBottom: 10 },
-  logoutText:       { fontSize: 15, fontWeight: "700", color: "#ef4444" },
-  version:          { textAlign: "center", fontSize: 11, color: "#d1d5db", marginBottom: 8 },
+  versionText: { textAlign: "center", fontSize: 12, color: "#c4c9d0", fontWeight: "500", marginBottom: 14, marginTop: 4 },
+  logoutBtn: {
+    flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8,
+    marginHorizontal: 20, paddingVertical: 16, borderRadius: 18,
+    borderWidth: 1.5, borderColor: "#fecaca", backgroundColor: "#fff5f5",
+  },
+  logoutBtnText: { fontSize: 15, fontWeight: "700", color: "#ef4444" },
 });
 
-const ms = StyleSheet.create({
-  overlay:    { flex: 1, backgroundColor: "rgba(16,23,32,0.45)", justifyContent: "center", alignItems: "center", paddingHorizontal: 24 },
-  modal:      { backgroundColor: "#fff", borderRadius: 26, padding: 28, width: "100%", maxWidth: 380, alignItems: "center", borderWidth: 1, borderColor: "#eef0f3" },
-  iconCircle: { width: 72, height: 72, borderRadius: 24, backgroundColor: "#fef2f2", alignItems: "center", justifyContent: "center", marginBottom: 20, borderWidth: 1, borderColor: "#fecaca" },
-  title:      { fontSize: 20, fontWeight: "800", color: "#101720", textAlign: "center", marginBottom: 10, letterSpacing: -0.3 },
-  message:    { fontSize: 14, color: "#8696a0", textAlign: "center", lineHeight: 21, marginBottom: 28, paddingHorizontal: 8, fontWeight: "500" },
-  btnRow:     { flexDirection: "row", gap: 12, width: "100%" },
-  cancelBtn:  { flex: 1, backgroundColor: "#f4f8ff", borderRadius: 16, paddingVertical: 14, alignItems: "center", borderWidth: 1, borderColor: "#eef0f3" },
-  cancelText: { color: "#8696a0", fontSize: 14, fontWeight: "700" },
+const modalS = StyleSheet.create({
+  overlay: { flex: 1, backgroundColor: "rgba(16,23,32,0.45)", justifyContent: "center", alignItems: "center", paddingHorizontal: 24 },
+  modal: {
+    backgroundColor: "#fff", borderRadius: 26, padding: 28, width: "100%",
+    maxWidth: 380, alignItems: "center", borderWidth: 1, borderColor: "#eef0f3",
+  },
+  iconCircle: {
+    width: 72, height: 72, borderRadius: 24, backgroundColor: "#fef2f2",
+    alignItems: "center", justifyContent: "center", marginBottom: 20,
+    borderWidth: 1, borderColor: "#fecaca",
+  },
+  title: { fontSize: 20, fontWeight: "800", color: "#101720", textAlign: "center", marginBottom: 10 },
+  message: { fontSize: 14, color: "#8696a0", textAlign: "center", lineHeight: 21, marginBottom: 28, fontWeight: "500" },
+  buttonRow: { flexDirection: "row", gap: 12, width: "100%" },
+  cancelBtn: {
+    flex: 1, backgroundColor: "#f4f8ff", borderRadius: 16, paddingVertical: 14,
+    alignItems: "center", borderWidth: 1, borderColor: "#eef0f3",
+  },
+  cancelBtnText: { color: "#8696a0", fontSize: 14, fontWeight: "700" },
   confirmBtn: { flex: 1, backgroundColor: "#ef4444", borderRadius: 16, paddingVertical: 14, alignItems: "center" },
-  confirmText:{ color: "#fff", fontSize: 14, fontWeight: "700" },
-});
-
-const ts = StyleSheet.create({
-  toast:      { position: "absolute", top: 12, left: 20, right: 20, zIndex: 999, flexDirection: "row", alignItems: "center", gap: 10, backgroundColor: "#fff", borderRadius: 16, paddingHorizontal: 16, paddingVertical: 14, borderWidth: 1, borderColor: "#bbf7d0", shadowColor: "#000", shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.08, shadowRadius: 12, elevation: 8 },
-  iconCircle: { width: 36, height: 36, borderRadius: 11, backgroundColor: "#f0fdf4", justifyContent: "center", alignItems: "center" },
-  toastText:  { fontSize: 14, fontWeight: "700", color: "#15803d" },
+  confirmBtnText: { color: "#fff", fontSize: 14, fontWeight: "700" },
 });

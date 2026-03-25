@@ -36,6 +36,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 const { width: SCREEN_W } = Dimensions.get("window");
 const OTP_LENGTH = 6;
 
+
 // ─── Phone step ───────────────────────────────────────────────────────────────
 
 function PhoneStep({
@@ -336,6 +337,7 @@ function PasswordStep({
 type Mode = "phone" | "otp" | "password";
 
 export default function LoginScreen() {
+  const [confirmationResult, setConfirmationResult] = useState<any>(null);
   const { loginWithOTP, verifyOTP, resendOTP, login } = useAuth();
   const router = useRouter();
 
@@ -362,41 +364,46 @@ export default function LoginScreen() {
     });
   };
 
-  const handleSendOTP = async (ph: string) => {
-    setError("");
-    setLoading(true);
-    try {
-      await loginWithOTP(ph);
-      setPhone(ph);
-      transition("otp");
-    } catch (e: any) {
-      setError(e.message || "Could not send OTP. Check the number and try again.");
-    } finally {
-      setLoading(false);
-    }
-  };
+ const handleSendOTP = async (ph: string) => {
+  setError("");
+  setLoading(true);
+  try {
+    const result = await loginWithOTP(ph);
+    setConfirmationResult(result);
+    setPhone(ph);
+    transition("otp");
+  } catch (e: any) {
+    setError(e.message || "Could not send OTP. Check the number and try again.");
+  } finally {
+    setLoading(false);
+  }
+};
 
-  const handleVerifyOTP = async (otp: string) => {
-    setError("");
-    setLoading(true);
-    try {
-      await verifyOTP(otp);
-      // Navigation handled by AuthContext re-render
-    } catch (e: any) {
-      setError(e.message || "Invalid OTP. Please try again.");
-    } finally {
-      setLoading(false);
+const handleVerifyOTP = async (otp: string) => {
+  setError("");
+  setLoading(true);
+  try {
+    if (!confirmationResult) {
+      throw new Error("Session expired. Please go back and request OTP again.");
     }
-  };
+    await verifyOTP(otp, confirmationResult);
+    // Navigation will be handled by AuthContext + your protected route logic
+  } catch (e: any) {
+    setError(e.message || "Invalid OTP. Please try again.");
+  } finally {
+    setLoading(false);
+  }
+};
 
-  const handleResend = async () => {
-    setError("");
-    try {
-      await resendOTP();
-    } catch (e: any) {
-      setError(e.message || "Could not resend OTP.");
-    }
-  };
+const handleResend = async () => {
+  setError("");
+  try {
+    const result = await resendOTP(phone);
+    setConfirmationResult(result);        // update verificationId
+  } catch (e: any) {
+    setError(e.message || "Could not resend OTP.");
+  }
+};
 
   const handlePasswordLogin = async (id: string, pw: string) => {
     setError("");
