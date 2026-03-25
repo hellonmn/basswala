@@ -21,6 +21,9 @@ function RootLayoutContent() {
       <Stack.Screen name="(tabs)" />
       <Stack.Screen name="equipment/[id]" />
       <Stack.Screen name="booking-flow" />
+      <Stack.Screen name="djs" />
+      <Stack.Screen name="dj-detail" />
+      <Stack.Screen name="my-bookings" />
     </Stack>
   );
 }
