@@ -356,6 +356,17 @@ export default function ProfileScreen() {
                 onPress={() => router.push("/profile/saved-djs" as any)} />
             </Section>
 
+            {/* Payments */}
+            <Section title="Payments">
+              <MenuRow icon="wallet-outline" label="Basswala Wallet"
+                sublabel="Balance · Transactions · Top-up"
+                onPress={() => router.push("/wallet" as any)} />
+              <Divider />
+              <MenuRow icon="refresh-circle-outline" label="Refunds"
+                sublabel="Request or track a refund"
+                onPress={() => router.push("/wallet/refund" as any)} />
+            </Section>
+
             {/* Preferences */}
             <Section title="Preferences">
               <MenuRow icon="location-outline" label="Location"

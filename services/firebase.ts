@@ -17,8 +17,6 @@ import {
   getAuth,
   signInWithPhoneNumber,
   signOut,
-  PhoneAuthProvider,
-  signInWithCredential,
 } from "@react-native-firebase/auth";
 import type { ConfirmationResult } from "@react-native-firebase/auth";
 

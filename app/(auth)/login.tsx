@@ -276,9 +276,9 @@ function PasswordStep({
         <Ionicons name="arrow-back" size={20} color="#0cadab" />
         <Text style={s.backText}>Use OTP instead</Text>
       </TouchableOpacity>
-
+{/* 
       <Text style={s.stepTitle}>Sign in with{"\n"}password</Text>
-      <Text style={s.stepSub}>For DJs and admins only</Text>
+      <Text style={s.stepSub}>For DJs and admins only</Text> */}
 
       <View style={[s.phonePill, error ? s.pillErr : null]}>
         <Ionicons name="mail-outline" size={18} color="#C0C0C0" style={{ marginRight: 8 }} />
