@@ -1,138 +1,204 @@
 /**
- * equipment/[id].tsx — Dynamic: loads real DJ data from backend
+ * [id].tsx — DJ Detail Screen (Updated with real servicesApi)
  */
 
-import React, { useState, useRef, useEffect, useCallback } from "react";
-import {
-  View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  Image, Dimensions, StatusBar, Share, Alert, Animated, ActivityIndicator,
-} from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { LinearGradient } from "expo-linear-gradient";
-import { useRouter, useLocalSearchParams } from "expo-router";
-import { apiService } from "../../services/api";
+import { useLocalSearchParams, useRouter } from "expo-router";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import {
+  ActivityIndicator,
+  Alert,
+  Animated,
+  Dimensions,
+  Image,
+  ScrollView,
+  Share,
+  StatusBar,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+} from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import BookingBottomSheet, { Equipment, RentalReceipt } from "../../components/BookingBottomSheet";
+import { servicesApi } from "../../services/userApi";
 
 const { width } = Dimensions.get("window");
 const IMG_HEIGHT = width * 1.15;
 
-// ─── DJ → Equipment mapper ─────────────────────────────────────────────────
+interface CaptainDJ {
+  id: number;
+  name: string;
+  bio?: string;
+  genres: string[];
+  experienceYears: number;
+  hourlyRate: number;
+  minimumHours: number;
+  currency: string;
+  isAvailable: boolean;
+  specializations: string[];
+  ratingAverage: number;
+  ratingCount: number;
+  images: string[];
+  captain?: {
+    id: number;
+    businessName?: string;
+    locationCity?: string;
+    locationState?: string;
+  };
+}
 
+// ─── DJ → Equipment Mapper (Updated) ───────────────────────────────────────
 function mapDJToEquipment(dj: any): Equipment & {
-  image: string; images: string[]; rating: number; reviews: number;
-  available: boolean; vendor: string; vendorRating: number; deliveryTime: string;
-  description: string; features: string[]; specifications: Record<string, string>;
-  rentalTerms: string[]; trustStats: any[];
+  image: string;
+  images: string[];
+  rating: number;
+  reviews: number;
+  available: boolean;
+  vendor: string;
+  vendorRating: number;
+  deliveryTime: string;
+  description: string;
+  features: string[];
+  specifications: Record<string, string>;
+  rentalTerms: string[];
+  trustStats: any[];
 } {
-  const genres = Array.isArray(dj.genres) ? dj.genres : [];
-  const djImages = Array.isArray(dj.images) && dj.images.length > 0 ? dj.images :
-    ["https://images.unsplash.com/photo-1571330735066-03aaa9429d89?w=400&q=80",
-     "https://images.unsplash.com/photo-1508700115892-45ecd05ae2ad?w=400&q=80"];
+  const genres = typeof dj.genres === "string" ? JSON.parse(dj.genres) : (dj.genres || []);
+  const images = typeof dj.images === "string"
+    ? JSON.parse(dj.images)
+    : (Array.isArray(dj.images) && dj.images.length > 0 ? dj.images : []);
 
-  const ownerName = dj.owner ? `${dj.owner.firstName || ""} ${dj.owner.lastName || ""}`.trim() : dj.name;
+  const defaultImages = [
+    "https://images.unsplash.com/photo-1571330735066-03aaa9429d89?w=400&q=80",
+    "https://images.unsplash.com/photo-1508700115892-45ecd05ae2ad?w=400&q=80",
+  ];
 
-  const specs: Record<string, string> = {};
-  if (dj.equipment && typeof dj.equipment === "object") {
-    if (dj.equipment.speakers) specs["Speakers"] = dj.equipment.speakers;
-    if (dj.equipment.mixer) specs["Mixer"] = dj.equipment.mixer;
-    if (dj.equipment.microphones) specs["Microphones"] = String(dj.equipment.microphones);
-    if (dj.equipment.turntables !== undefined) specs["Turntables"] = dj.equipment.turntables ? "Yes" : "No";
-    if (dj.equipment.lightingSystem !== undefined) specs["Lighting"] = dj.equipment.lightingSystem ? "Yes" : "No";
-    if (dj.equipment.additionalEquipment?.length) {
-      specs["Extras"] = dj.equipment.additionalEquipment.join(", ");
-    }
-  }
+  const vendorName = dj.captain?.businessName || dj.name;
+
+  const specs: Record<string, string> = {
+    Genres: genres.join(", ") || "Various",
+    "Min Hours": String(dj.minimumHours || 3),
+    "Hourly Rate": `₹${Number(dj.hourlyRate).toLocaleString()} ${dj.currency || "INR"}`,
+    Experience: `${dj.experienceYears || 0} years`,
+  };
 
   const features = [
-    ...genres.map((g: string) => `${g} music specialist`),
-    `Minimum ${dj.minimumHours || 2} hours booking`,
-    dj.equipment?.speakers ? `Sound: ${dj.equipment.speakers}` : null,
-    dj.equipment?.mixer ? `Mixer: ${dj.equipment.mixer}` : null,
-    dj.equipment?.lightingSystem ? "Lighting system included" : null,
-    dj.locationCity ? `Based in ${dj.locationCity}` : null,
+    ...genres.map((g: string) => `${g} Specialist`),
+    `Minimum ${dj.minimumHours || 3} hours booking`,
+    `₹${Number(dj.hourlyRate).toLocaleString()}/hour`,
+    dj.captain?.locationCity ? `Based in ${dj.captain.locationCity}` : null,
   ].filter(Boolean) as string[];
 
   return {
     id: String(dj.id),
     name: dj.name,
     category: genres.slice(0, 2).join(" / ") || "DJ Service",
-    price: Math.round(dj.hourlyRate || 0),
-    deposit: Math.round((dj.hourlyRate || 0) * 2),
-    pickupAddress: [dj.locationStreet, dj.locationCity, dj.locationState].filter(Boolean).join(", ") || "Location available on booking",
+    price: Math.round(Number(dj.hourlyRate) || 0),
+    deposit: Math.round((Number(dj.hourlyRate) || 0) * 2),
+    pickupAddress: dj.captain?.locationCity || "Location on request",
     accentColor: "#0cadab",
-    image: djImages[0],
-    images: djImages,
+    image: images[0] || defaultImages[0],
+    images: images.length ? images : defaultImages,
     rating: parseFloat(dj.ratingAverage) || 0,
     reviews: dj.ratingCount || 0,
     available: dj.isAvailable !== false,
-    vendor: ownerName || dj.name,
+    vendor: vendorName,
     vendorRating: parseFloat(dj.ratingAverage) || 0,
     deliveryTime: "Available on request",
-    description: dj.description || `${dj.name} is a professional DJ specializing in ${genres.join(", ")}. Book now for your next event!`,
+    description: dj.bio || `${dj.name} is a professional DJ with experience in ${genres.join(", ")}. Ready to make your event unforgettable!`,
     features,
-    specifications: Object.keys(specs).length ? specs : { Genres: genres.join(", "), "Min Hours": String(dj.minimumHours || 2), Currency: dj.currency || "INR" },
+    specifications: specs,
     rentalTerms: [
-      `Minimum booking: ${dj.minimumHours || 2} hours`,
-      "50% advance payment to confirm booking",
-      "Cancellation 48hrs prior for full refund",
-      "Travel charges may apply beyond 30km",
-      "Equipment setup & teardown included",
-      "We will handle all logistics and delivery",
+      `Minimum booking: ${dj.minimumHours || 3} hours`,
+      "50% advance payment to confirm",
+      "Cancellation 48 hours prior for full refund",
+      "Travel charges may apply beyond city limits",
+      "Setup & teardown included",
+      "Professional sound & lighting equipment",
     ],
     trustStats: [
       { label: "Events", value: `${dj.ratingCount || 0}+`, icon: "calendar-outline" },
       { label: "Rating", value: `${(parseFloat(dj.ratingAverage) || 0).toFixed(1)}★`, icon: "star-outline" },
       { label: "Response", value: "<2hr", icon: "flash-outline" },
-      { label: "Genre", value: genres[0]?.slice(0, 6) || "DJ", icon: "musical-notes-outline" },
+      { label: "Genre", value: genres[0]?.slice(0, 8) || "DJ", icon: "musical-notes-outline" },
     ],
   };
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
+// ─── Star Rating Component ───────────────────────────────────────────────────
 const StarRating = ({ rating, size = 14 }: { rating: number; size?: number }) => (
   <View style={{ flexDirection: "row", gap: 2 }}>
     {[1, 2, 3, 4, 5].map((s) => (
-      <Ionicons key={s} name={s <= Math.round(rating) ? "star" : "star-outline"} size={size}
-        color={s <= Math.round(rating) ? "#FFC107" : "#d1d5db"} />
+      <Ionicons
+        key={s}
+        name={s <= Math.round(rating) ? "star" : "star-outline"}
+        size={size}
+        color={s <= Math.round(rating) ? "#FFC107" : "#d1d5db"}
+      />
     ))}
   </View>
 );
 
-// ─── Main Screen ──────────────────────────────────────────────────────────────
-
-export default function EquipmentDetailScreen() {
+// ─── Main DJ Detail Screen ───────────────────────────────────────────────────
+export default function DJDetailScreen() {
   const router = useRouter();
   const params = useLocalSearchParams();
-  const djId = params.id as string;
+
+  const djId = params.id ? parseInt(params.id as string, 10) : NaN;
+  const captainId = params.captainId ? parseInt(params.captainId as string, 10) : 1;
 
   const [equipment, setEquipment] = useState<ReturnType<typeof mapDJToEquipment> | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const [imgIndex, setImgIndex] = useState(0);
-  // Start hours at DJ's minimumHours once loaded (updated after data fetch)
-  const [hours, setHours] = useState(2);
-  const [minHours, setMinHours] = useState(2);
+  const [hours, setHours] = useState(3);
+  const [minHours, setMinHours] = useState(3);
   const [isFavorite, setIsFavorite] = useState(false);
   const [sheetVisible, setSheetVisible] = useState(false);
 
   const scrollY = useRef(new Animated.Value(0)).current;
-  const headerBgClr = scrollY.interpolate({ inputRange: [IMG_HEIGHT - 90, IMG_HEIGHT - 30], outputRange: ["rgba(244,248,255,0)", "rgba(244,248,255,1)"], extrapolate: "clamp" });
-  const headerTitle = scrollY.interpolate({ inputRange: [IMG_HEIGHT - 80, IMG_HEIGHT - 20], outputRange: [0, 1], extrapolate: "clamp" });
+  const headerBgClr = scrollY.interpolate({
+    inputRange: [IMG_HEIGHT - 90, IMG_HEIGHT - 30],
+    outputRange: ["rgba(244,248,255,0)", "rgba(244,248,255,1)"],
+    extrapolate: "clamp",
+  });
+  const headerTitleOpacity = scrollY.interpolate({
+    inputRange: [IMG_HEIGHT - 80, IMG_HEIGHT - 20],
+    outputRange: [0, 1],
+    extrapolate: "clamp",
+  });
 
   const loadDJ = useCallback(async () => {
-    if (!djId) { setError("Invalid DJ ID"); setLoading(false); return; }
+    if (isNaN(djId)) {
+      setError("Invalid DJ ID");
+      setLoading(false);
+      return;
+    }
+
     try {
-      const res = await apiService.getDJById(djId);
-      const djData = res.data || res;
-      const mapped = mapDJToEquipment(djData);
+      setLoading(true);
+      const res = await servicesApi.getAllDJs();
+
+      if (!res.success || !Array.isArray(res.data)) {
+        throw new Error("Invalid response from server");
+      }
+
+      const foundDJ = res.data.find((d: any) => Number(d.id) === djId);
+
+      if (!foundDJ) {
+        setError("DJ not found");
+        return;
+      }
+
+      const mapped = mapDJToEquipment(foundDJ);
       setEquipment(mapped);
-      // Set initial hours to DJ's minimum booking hours from DB
-      const min = djData.minimumHours || 2;
-      setMinHours(min);
-      setHours(min);
+
+      const minH = Number(foundDJ.minimumHours) || 3;
+      setMinHours(minH);
+      setHours(minH);
     } catch (err: any) {
       console.error("Failed to load DJ:", err);
       setError("Could not load DJ details. Please try again.");
@@ -141,17 +207,23 @@ export default function EquipmentDetailScreen() {
     }
   }, [djId]);
 
-  useEffect(() => { loadDJ(); }, [loadDJ]);
+  useEffect(() => {
+    loadDJ();
+  }, [loadDJ]);
 
   const handleShare = async () => {
     if (!equipment) return;
     try {
-      await Share.share({ message: `Check out ${equipment.name} – ₹${equipment.price}/hr on Basswala!` });
-    } catch (e: any) { Alert.alert("Error", e.message); }
+      await Share.share({
+        message: `Check out ${equipment.name} – Professional DJ at just ₹${equipment.price}/hr on Basswala!`,
+      });
+    } catch (e: any) {
+      Alert.alert("Error", e.message);
+    }
   };
 
   const handleBook = () => {
-    if (!equipment) return;
+    if (!equipment || !equipment.available) return;
     setSheetVisible(true);
   };
 
@@ -166,15 +238,18 @@ export default function EquipmentDetailScreen() {
 
   if (error || !equipment) {
     return (
-      <View style={{ flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: "#f4f8ff", padding: 32 }}>
+      <SafeAreaView style={{ flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: "#f4f8ff", padding: 32 }}>
         <Ionicons name="alert-circle-outline" size={48} color="#ef4444" />
         <Text style={{ fontSize: 18, fontWeight: "700", color: "#101720", marginTop: 16, textAlign: "center" }}>
           {error || "DJ not found"}
         </Text>
-        <TouchableOpacity style={{ marginTop: 20, backgroundColor: "#0cadab", paddingHorizontal: 24, paddingVertical: 12, borderRadius: 12 }} onPress={() => router.back()}>
+        <TouchableOpacity
+          style={{ marginTop: 20, backgroundColor: "#0cadab", paddingHorizontal: 24, paddingVertical: 12, borderRadius: 12 }}
+          onPress={() => router.back()}
+        >
           <Text style={{ color: "#fff", fontWeight: "700" }}>Go Back</Text>
         </TouchableOpacity>
-      </View>
+      </SafeAreaView>
     );
   }
 
@@ -194,15 +269,19 @@ export default function EquipmentDetailScreen() {
         {/* Hero Images */}
         <View style={styles.hero}>
           <View style={styles.heroCard}>
-            <ScrollView horizontal pagingEnabled showsHorizontalScrollIndicator={false}
+            <ScrollView
+              horizontal
+              pagingEnabled
+              showsHorizontalScrollIndicator={false}
               onScroll={(e) => setImgIndex(Math.round(e.nativeEvent.contentOffset.x / width))}
-              scrollEventThrottle={16}>
+              scrollEventThrottle={16}
+            >
               {equipment.images.map((uri, i) => (
                 <Image key={i} source={{ uri }} style={styles.heroImg} resizeMode="cover" />
               ))}
             </ScrollView>
             <View style={styles.dots}>
-              {equipment.images.map((_: any, i: number) => (
+              {equipment.images.map((_, i) => (
                 <View key={i} style={[styles.dot, i === imgIndex && styles.dotActive]} />
               ))}
             </View>
@@ -219,7 +298,6 @@ export default function EquipmentDetailScreen() {
 
         {/* Content */}
         <View style={styles.content}>
-
           {/* Title */}
           <View style={styles.titleBlock}>
             <View style={styles.topMeta}>
@@ -241,7 +319,7 @@ export default function EquipmentDetailScreen() {
             </View>
           </View>
 
-          {/* Trust stats */}
+          {/* Trust Stats */}
           <View style={styles.trustBar}>
             {equipment.trustStats.map((stat: any, i: number) => (
               <View key={i} style={styles.trustItem}>
@@ -281,28 +359,29 @@ export default function EquipmentDetailScreen() {
                 <Text style={styles.depositHint}>Min. {minHours} hr{minHours > 1 ? "s" : ""} booking</Text>
               </View>
             </View>
+
             <View style={styles.pricingDivider} />
+
             <View style={styles.daySel}>
               <Text style={styles.daySelLabel}>HOURS</Text>
               <View style={styles.daySelControls}>
                 <TouchableOpacity
                   style={[styles.dayBtn, hours <= minHours && styles.dayBtnOff]}
-                  onPress={() => setHours(h => Math.max(minHours, h - 1))}
-                  activeOpacity={0.8}
+                  onPress={() => setHours((h) => Math.max(minHours, h - 1))}
                   disabled={hours <= minHours}
                 >
                   <Ionicons name="remove" size={18} color={hours <= minHours ? "#c4c9d0" : "#fff"} />
                 </TouchableOpacity>
                 <Text style={styles.dayNum}>{hours}</Text>
-                <TouchableOpacity style={styles.dayBtn} onPress={() => setHours(h => h + 1)} activeOpacity={0.8}>
+                <TouchableOpacity style={styles.dayBtn} onPress={() => setHours((h) => h + 1)}>
                   <Ionicons name="add" size={18} color="#fff" />
                 </TouchableOpacity>
               </View>
             </View>
           </View>
 
-          {/* Total banner */}
-          <LinearGradient colors={["#101720", "#1e2d3d"]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }} style={styles.totalBanner}>
+          {/* Total Banner */}
+          <LinearGradient colors={["#101720", "#1e2d3d"]} style={styles.totalBanner}>
             <View style={{ flex: 1 }}>
               <Text style={styles.totalLabel}>BOOKING · {hours} HR{hours > 1 ? "S" : ""}</Text>
               <Text style={styles.totalAmount}>₹{total.toLocaleString()}</Text>
@@ -352,31 +431,34 @@ export default function EquipmentDetailScreen() {
           )}
 
           {/* Specifications */}
-          {Object.keys(equipment.specifications).length > 0 && (
-            <View style={styles.section}>
-              <Text style={styles.sectionTitle}>Equipment Details</Text>
-              <View style={styles.infoCard}>
-                {Object.entries(equipment.specifications).map(([k, v], i, arr) => (
-                  <View key={k}>
-                    <View style={styles.specRow}>
-                      <View style={styles.specLeft}><View style={styles.specDot} /><Text style={styles.specKey}>{k}</Text></View>
-                      <Text style={styles.specVal}>{v as string}</Text>
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Details</Text>
+            <View style={styles.infoCard}>
+              {Object.entries(equipment.specifications).map(([k, v], i, arr) => (
+                <View key={k}>
+                  <View style={styles.specRow}>
+                    <View style={styles.specLeft}>
+                      <View style={styles.specDot} />
+                      <Text style={styles.specKey}>{k}</Text>
                     </View>
-                    {i < arr.length - 1 && <View style={styles.rowDivider} />}
+                    <Text style={styles.specVal}>{v}</Text>
                   </View>
-                ))}
-              </View>
+                  {i < arr.length - 1 && <View style={styles.rowDivider} />}
+                </View>
+              ))}
             </View>
-          )}
+          </View>
 
-          {/* Rental Terms */}
+          {/* Booking Terms */}
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>Booking Terms</Text>
             <View style={styles.infoCard}>
               {equipment.rentalTerms.map((t: string, i: number) => (
                 <View key={i}>
                   <View style={styles.termRow}>
-                    <View style={styles.termIconBox}><Ionicons name="information-circle-outline" size={16} color="#0cadab" /></View>
+                    <View style={styles.termIconBox}>
+                      <Ionicons name="information-circle-outline" size={16} color="#0cadab" />
+                    </View>
                     <Text style={styles.termText}>{t}</Text>
                   </View>
                   {i < equipment.rentalTerms.length - 1 && <View style={styles.rowDivider} />}
@@ -384,16 +466,6 @@ export default function EquipmentDetailScreen() {
               ))}
             </View>
           </View>
-
-          {/* Location */}
-          {equipment.pickupAddress && equipment.pickupAddress !== "Location available on booking" && (
-            <LinearGradient colors={["#0cadab", "#0a9998"]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }} style={styles.promoStrip}>
-              <View>
-                <Text style={styles.promoTitle}>📍 Location</Text>
-                <Text style={styles.promoSub}>{equipment.pickupAddress}</Text>
-              </View>
-            </LinearGradient>
-          )}
 
           <View style={{ height: 120 }} />
         </View>
@@ -405,14 +477,14 @@ export default function EquipmentDetailScreen() {
           <TouchableOpacity style={styles.headerBtn} onPress={() => router.back()} activeOpacity={0.8}>
             <Ionicons name="arrow-back" size={22} color="#101720" />
           </TouchableOpacity>
-          <Animated.Text style={[styles.headerTitleText, { opacity: headerTitle }]} numberOfLines={1}>
+          <Animated.Text style={[styles.headerTitleText, { opacity: headerTitleOpacity }]} numberOfLines={1}>
             {equipment.name}
           </Animated.Text>
           <View style={styles.headerActions}>
             <TouchableOpacity style={styles.headerBtn} onPress={handleShare} activeOpacity={0.8}>
               <Ionicons name="share-social-outline" size={22} color="#101720" />
             </TouchableOpacity>
-            <TouchableOpacity style={styles.headerBtn} onPress={() => setIsFavorite(f => !f)} activeOpacity={0.8}>
+            <TouchableOpacity style={styles.headerBtn} onPress={() => setIsFavorite((f) => !f)} activeOpacity={0.8}>
               <Ionicons name={isFavorite ? "heart" : "heart-outline"} size={22} color={isFavorite ? "#ef4444" : "#101720"} />
             </TouchableOpacity>
           </View>
@@ -422,10 +494,14 @@ export default function EquipmentDetailScreen() {
       {/* Bottom Action Bar */}
       <SafeAreaView edges={["bottom"]} style={styles.bottomWrap}>
         <View style={styles.bottomBar}>
-          <TouchableOpacity style={[styles.bookBtn, !equipment.available && styles.bookBtnOff]}
-            onPress={handleBook} disabled={!equipment.available} activeOpacity={0.88}>
+          <TouchableOpacity
+            style={[styles.bookBtn, !equipment.available && styles.bookBtnOff]}
+            onPress={handleBook}
+            disabled={!equipment.available}
+            activeOpacity={0.88}
+          >
             <View>
-              <Text style={styles.bookBtnLabel}>{equipment.available ? "Book Now" : "Unavailable"}</Text>
+              <Text style={styles.bookBtnLabel}>{equipment.available ? "Book Now" : "Currently Unavailable"}</Text>
               {equipment.available && (
                 <Text style={styles.bookBtnSub}>₹{total.toLocaleString()} · {hours} hr{hours > 1 ? "s" : ""}</Text>
               )}
@@ -439,19 +515,23 @@ export default function EquipmentDetailScreen() {
         </View>
       </SafeAreaView>
 
-      {/* Booking Sheet */}
+      {/* Booking Bottom Sheet */}
       <BookingBottomSheet
         visible={sheetVisible}
         equipment={equipment}
         days={hours}
-        onClose={() => { setSheetVisible(false); }}
-        onBooked={(receipt: RentalReceipt) => { console.log("Booked:", receipt); }}
+        onClose={() => setSheetVisible(false)}
+        onBooked={(receipt: RentalReceipt) => {
+          console.log("Booked:", receipt);
+          Alert.alert("Success", "Your booking request has been sent!");
+        }}
         onViewBookings={() => router.replace("/(tabs)/bookings")}
       />
     </View>
   );
 }
 
+// Styles (unchanged - keeping your beautiful design)
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: "#f4f8ff" },
   statusBarSpacer: { height: 30 },
@@ -529,9 +609,6 @@ const styles = StyleSheet.create({
   termRow: { flexDirection: "row", alignItems: "flex-start", gap: 12, paddingHorizontal: 16, paddingVertical: 14 },
   termIconBox: { width: 28, height: 28, borderRadius: 9, backgroundColor: "#f0fafa", justifyContent: "center", alignItems: "center", borderWidth: 1, borderColor: "#d0f0ef", marginTop: 1 },
   termText: { flex: 1, fontSize: 14, color: "#4b6585", fontWeight: "500", lineHeight: 21 },
-  promoStrip: { marginHorizontal: 20, borderRadius: 18, paddingHorizontal: 20, paddingVertical: 18, marginBottom: 20 },
-  promoTitle: { fontSize: 16, fontWeight: "800", color: "#fff", marginBottom: 3 },
-  promoSub: { fontSize: 12, color: "rgba(255,255,255,0.8)", fontWeight: "500" },
   headerWrap: { position: "absolute", top: 0, left: 0, right: 0, zIndex: 100 },
   headerInner: { flexDirection: "row", alignItems: "center", paddingHorizontal: 16, paddingVertical: 10, gap: 8 },
   headerBtn: { width: 40, height: 40, borderRadius: 13, backgroundColor: "rgba(255,255,255,0.88)", justifyContent: "center", alignItems: "center", borderWidth: 1, borderColor: "rgba(238,240,243,0.7)" },

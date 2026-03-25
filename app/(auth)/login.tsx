@@ -364,12 +364,11 @@ export default function LoginScreen() {
     });
   };
 
- const handleSendOTP = async (ph: string) => {
+const handleSendOTP = async (ph: string) => {
   setError("");
   setLoading(true);
   try {
-    const result = await loginWithOTP(ph);
-    setConfirmationResult(result);
+    await loginWithOTP(ph);   // context stores confirmation internally
     setPhone(ph);
     transition("otp");
   } catch (e: any) {
@@ -379,15 +378,12 @@ export default function LoginScreen() {
   }
 };
 
+// ── Replace handleVerifyOTP ──
 const handleVerifyOTP = async (otp: string) => {
   setError("");
   setLoading(true);
   try {
-    if (!confirmationResult) {
-      throw new Error("Session expired. Please go back and request OTP again.");
-    }
-    await verifyOTP(otp, confirmationResult);
-    // Navigation will be handled by AuthContext + your protected route logic
+    await verifyOTP(otp);     // context uses its internal confirmationRef
   } catch (e: any) {
     setError(e.message || "Invalid OTP. Please try again.");
   } finally {
@@ -395,11 +391,11 @@ const handleVerifyOTP = async (otp: string) => {
   }
 };
 
+// ── Replace handleResend ──
 const handleResend = async () => {
   setError("");
   try {
-    const result = await resendOTP(phone);
-    setConfirmationResult(result);        // update verificationId
+    await resendOTP();        // context uses its internal pendingPhoneRef
   } catch (e: any) {
     setError(e.message || "Could not resend OTP.");
   }
