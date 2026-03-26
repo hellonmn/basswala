@@ -1,14 +1,15 @@
 /**
- * bookings.tsx — Updated with real bookingApi
+ * bookings.tsx — User Side Bookings Screen (Original UI + Real Statuses)
+ * Click opens full detail screen instead of bottom sheet
  */
 
 import { Ionicons } from "@expo/vector-icons";
 import { LinearGradient } from "expo-linear-gradient";
-import { useFocusEffect } from "expo-router";
+import { useFocusEffect, useRouter } from "expo-router";
 import React, { useCallback, useState } from "react";
 import {
+  ActivityIndicator,
   Alert,
-  Animated,
   Dimensions,
   Image,
   RefreshControl,
@@ -20,164 +21,97 @@ import {
   View
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { bookingApi } from "../../services/userApi"; // ← Updated import
+import { bookingApi } from "../../services/userApi";
 
-const { width, height } = Dimensions.get("window");
+const { width } = Dimensions.get("window");
 
-// ─── Types ────────────────────────────────────────────────────────────────────
 interface Booking {
-  id: number | string;
+  id: number;
   name: string;
   category: string;
   image: string;
   price: number;
   startDate: string;
   endDate: string;
-  days: number;           // duration in hours
-  status: string;
+  days: number;
+  status: string;                    // Real status from captain
   orderId: string;
   deliveryAddress: string;
   vendor: string;
   vendorPhone: string;
-  deposit: number;
-  notes: string;
+  totalAmount: number;
+  eventType?: string;
+  eventDate?: string;
+  startTime?: string;
+  endTime?: string;
+  specialRequests?: string;
   rating?: number;
-  totalAmount?: number;
+  captainNotes?: string;
 }
 
-// ─── Image Resolver ───────────────────────────────────────────────────────────
+// ─── Helpers ────────────────────────────────────────────────────────────────
 function resolveDJImage(b: any): string {
   const FALLBACK = "https://images.unsplash.com/photo-1508700115892-45ecd05ae2ad?w=400&q=80";
+  const dj = b.captainDJ ?? b.dj ?? {};
+  let imgs = dj.images ?? b.images;
 
-  const dj = b.captainDJ ?? b.dj ?? b.djProfile ?? null;
-  let imgs = dj?.images ?? b.images ?? null;
-
-  if (typeof imgs === "string") imgs = JSON.parse(imgs);
+  if (typeof imgs === "string") {
+    try { imgs = JSON.parse(imgs); } catch { imgs = []; }
+  }
   if (Array.isArray(imgs) && imgs.length > 0) return imgs[0];
   if (typeof imgs === "string" && imgs.length > 0) return imgs;
 
-  const single = dj?.profilePicture ?? dj?.image ?? b.image ?? null;
-  if (typeof single === "string" && single.length > 0) return single;
-
-  return FALLBACK;
+  return dj.profilePicture || b.image || FALLBACK;
 }
 
-// ─── Amount Resolver ──────────────────────────────────────────────────────────
 function resolveAmount(raw: any): number {
   const n = Number(raw) || 0;
-  if (n <= 0) return 0;
-  // If amount looks like paise (very large), convert to rupees
   return n > 10000 ? Math.round(n / 100) : n;
 }
 
-// ─── Map Backend Booking ──────────────────────────────────────────────────────
 function mapBooking(b: any): Booking {
   const dj = b.captainDJ ?? b.dj ?? {};
-  const djName = dj.name || "DJ Booking";
-
   const eventDate = b.eventDate || b.eventDetails?.eventDate;
-  const startDateStr = eventDate
-    ? new Date(eventDate).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })
-    : "—";
-
-  const durationHours = Number(b.durationHours || b.eventDetails?.durationHours || 3);
-
-  const price = resolveAmount(dj.hourlyRate || b.basePrice);
-  const totalAmount = resolveAmount(b.totalAmount || b.eventDetails?.totalAmount) || (price * durationHours);
-
-  let status = (b.status || "pending").toLowerCase().trim();
-  if (["confirmed", "in progress", "active"].includes(status)) status = "active";
-  else if (status === "completed") status = "completed";
-  else if (["cancelled", "canceled"].includes(status)) status = "cancelled";
-  else status = "upcoming";
-
-  const deliveryAddress = [
-    b.deliveryLocation?.street,
-    b.deliveryLocation?.city,
-    b.deliveryLocation?.state,
-  ].filter(Boolean).join(", ") || "—";
 
   return {
     id: b.id,
-    name: djName,
+    name: dj.name || "DJ Booking",
     category: b.eventType || "DJ Service",
     image: resolveDJImage(b),
-    price,
-    startDate: startDateStr,
-    endDate: startDateStr,
-    days: durationHours,
-    status,
-    orderId: `#ORD-${b.id}`,
-    deliveryAddress,
-    vendor: djName,
-    vendorPhone: dj.phone || "+91 00000 00000",
-    deposit: 0,
-    notes: b.specialRequests || "",
+    price: resolveAmount(dj.hourlyRate),
+    startDate: eventDate ? new Date(eventDate).toLocaleDateString("en-IN", { day: "numeric", month: "short" }) : "—",
+    endDate: eventDate ? new Date(eventDate).toLocaleDateString("en-IN", { day: "numeric", month: "short" }) : "—",
+    days: Number(b.durationHours || 3),
+    status: b.status || "Pending",
+    orderId: `#${b.id}`,
+    deliveryAddress: [b.deliveryStreet, b.deliveryCity, b.deliveryState].filter(Boolean).join(", ") || "—",
+    vendor: dj.name || "Captain DJ",
+    vendorPhone: dj.phone || "—",
+    totalAmount: resolveAmount(b.totalAmount),
+    eventType: b.eventType,
+    eventDate: b.eventDate,
+    startTime: b.startTime,
+    endTime: b.endTime,
+    specialRequests: b.specialRequests,
     rating: b.rating,
-    totalAmount,
+    captainNotes: b.captainNotes,
   };
 }
 
-const TABS = ["Active", "Upcoming", "Past"];
+const TABS = ["All", "Active", "Upcoming", "Past"] as const;
 
 const statusConfig: Record<string, any> = {
-  active: { label: "Active", color: "#22c55e", bg: "#f0fdf4", border: "#bbf7d0", icon: "radio-button-on" },
-  upcoming: { label: "Upcoming", color: "#0cadab", bg: "#f0fafa", border: "#d0f0ef", icon: "time-outline" },
-  completed: { label: "Completed", color: "#8696a0", bg: "#f8f9fa", border: "#e5e7eb", icon: "checkmark-circle-outline" },
-  cancelled: { label: "Cancelled", color: "#ef4444", bg: "#fef2f2", border: "#fecaca", icon: "close-circle-outline" },
+  Pending:              { label: "Pending",              color: "#f59e0b", bg: "#fffbeb", border: "#fde68a", icon: "time-outline" },
+  Confirmed:            { label: "Confirmed",            color: "#0cadab", bg: "#f0fffe", border: "#a5f3fc", icon: "checkmark-circle-outline" },
+  "Equipment Dispatched": { label: "Dispatched",         color: "#6366f1", bg: "#eef2ff", border: "#c7d2fe", icon: "car-outline" },
+  "In Progress":        { label: "In Progress",          color: "#22c55e", bg: "#f0fdf4", border: "#bbf7d0", icon: "play-circle-outline" },
+  Completed:            { label: "Completed",            color: "#8696a0", bg: "#f8fafc", border: "#e2e8f0", icon: "checkmark-done-outline" },
+  Cancelled:            { label: "Cancelled",            color: "#ef4444", bg: "#fef2f2", border: "#fecaca", icon: "close-circle-outline" },
 };
 
-// ─── Skeleton Component ───────────────────────────────────────────────────────
-const SkeletonBox = ({ w, h, r = 8 }: { w: number | string; h: number; r?: number }) => {
-  const anim = React.useRef(new Animated.Value(0)).current;
-  React.useEffect(() => {
-    const loop = Animated.loop(
-      Animated.sequence([
-        Animated.timing(anim, { toValue: 1, duration: 850, useNativeDriver: true }),
-        Animated.timing(anim, { toValue: 0, duration: 850, useNativeDriver: true }),
-      ])
-    );
-    loop.start();
-    return () => loop.stop();
-  }, []);
-  const opacity = anim.interpolate({ inputRange: [0, 1], outputRange: [0.3, 0.7] });
-  return <Animated.View style={{ width: w as any, height: h, borderRadius: r, backgroundColor: "#e5e7eb", opacity }} />;
-};
-
-// ─── Star Rating ─────────────────────────────────────────────────────────────
-const StarRating = ({ rating }: { rating: number }) => (
-  <View style={{ flexDirection: "row", gap: 2 }}>
-    {[1, 2, 3, 4, 5].map((s) => (
-      <Ionicons key={s} name={s <= rating ? "star" : "star-outline"} size={14} color={s <= rating ? "#FFC107" : "#d1d5db"} />
-    ))}
-  </View>
-);
-
-// ─── Booking Bottom Sheet (unchanged UI) ─────────────────────────────────────
-const PEEK_HEIGHT = height * 0.52;
-const FULL_HEIGHT = height * 0.95;
-const PEEK_TRANSLATE_Y = FULL_HEIGHT - PEEK_HEIGHT;
-const SNAP_THRESHOLD = 50;
-
-const BookingBottomSheet = ({
-  booking,
-  onClose,
-  onCancelBooking,
-  onAddReview,
-}: {
-  booking: Booking;
-  onClose: () => void;
-  onCancelBooking?: (id: string | number) => void;
-  onAddReview?: (id: string | number, rating: number) => void;
-}) => {
-  // ... (Your existing bottom sheet code remains unchanged)
-  // I'm keeping it exactly as you had for brevity. Paste your original sheet code here if needed.
-  // For space, I'm showing only the changed parts below.
-};
-
-// ─── Booking Card (unchanged) ─────────────────────────────────────────────────
+// ─── Booking Card (Your Original Beautiful Design) ───────────────────────────
 const BookingCard = ({ item, onPress }: { item: Booking; onPress: (b: Booking) => void }) => {
-  const cfg = statusConfig[item.status] || statusConfig.upcoming;
+  const cfg = statusConfig[item.status] || statusConfig.Pending;
   const total = item.totalAmount || item.price * item.days;
 
   return (
@@ -217,23 +151,10 @@ const BookingCard = ({ item, onPress }: { item: Booking; onPress: (b: Booking) =
   );
 };
 
-// ─── Empty State (unchanged) ──────────────────────────────────────────────────
-const EmptyState = ({ tab }: { tab: string }) => (
-  <View style={styles.empty}>
-    <View style={styles.emptyIcon}>
-      <Ionicons name={{ Active: "radio-button-off-outline", Upcoming: "calendar-outline", Past: "time-outline" }[tab] as any} size={38} color="#0cadab" />
-    </View>
-    <Text style={styles.emptyTitle}>Nothing here yet</Text>
-    <Text style={styles.emptyMsg}>
-      {{ Active: "No active bookings.\nExplore DJs and make your first booking!", Upcoming: "No upcoming bookings.\nPlan your next event!", Past: "No past bookings yet.\nYour history will appear here." }[tab]}
-    </Text>
-  </View>
-);
-
-// ─── Main Bookings Screen ─────────────────────────────────────────────────────
+// ─── Main Screen (Your Original UI Kept) ─────────────────────────────────────
 export default function BookingsScreen() {
-  const [activeTab, setActiveTab] = useState<"Active" | "Upcoming" | "Past">("Active");
-  const [selectedBooking, setSelectedBooking] = useState<Booking | null>(null);
+  const router = useRouter();
+  const [activeTab, setActiveTab] = useState<"All" | "Active" | "Upcoming" | "Past">("All");
   const [allBookings, setAllBookings] = useState<Booking[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -242,7 +163,6 @@ export default function BookingsScreen() {
     try {
       setLoading(true);
       const res = await bookingApi.getMyBookings({ limit: 50 });
-
       const rawList = res.success && Array.isArray(res.data) ? res.data : [];
       const mapped = rawList.map(mapBooking);
       setAllBookings(mapped);
@@ -266,42 +186,19 @@ export default function BookingsScreen() {
     fetchBookings();
   };
 
-  const handleCancelBooking = async (id: string | number) => {
-    try {
-      await bookingApi.cancel(id);
-      setAllBookings((prev) => prev.map((b) => (b.id === id ? { ...b, status: "cancelled" } : b)));
-      Alert.alert("Cancelled", "Booking has been cancelled.");
-    } catch (err: any) {
-      Alert.alert("Error", err.response?.data?.message || "Failed to cancel booking");
-    }
+  const getFilteredBookings = () => {
+    if (activeTab === "All") return allBookings;
+    if (activeTab === "Active") return allBookings.filter(b => ["Confirmed", "Equipment Dispatched", "In Progress"].includes(b.status));
+    if (activeTab === "Upcoming") return allBookings.filter(b => b.status === "Pending");
+    return allBookings.filter(b => ["Completed", "Cancelled"].includes(b.status));
   };
 
-  const handleAddReview = async (id: string | number, rating: number) => {
-    try {
-      await bookingApi.addReview(id, { rating });
-      setAllBookings((prev) => prev.map((b) => (b.id === id ? { ...b, rating } : b)));
-      Alert.alert("Thank you!", "Your review has been submitted.");
-    } catch (err: any) {
-      Alert.alert("Error", "Failed to submit review");
-    }
-  };
+  const items = getFilteredBookings();
 
-  const getTabItems = (tab: string) => {
-    if (tab === "Active") return allBookings.filter((b) => b.status === "active");
-    if (tab === "Upcoming") return allBookings.filter((b) => b.status === "upcoming");
-    if (tab === "Past") return allBookings.filter((b) => b.status === "completed" || b.status === "cancelled");
-    return [];
-  };
-
-  const items = getTabItems(activeTab);
-
-  const activeCount = allBookings.filter((b) => b.status === "active").length;
-  const upcomingCount = allBookings.filter((b) => b.status === "upcoming").length;
-  const pastCount = allBookings.filter((b) => b.status === "completed" || b.status === "cancelled").length;
-
-  const totalSpent = allBookings
-    .filter((b) => b.status !== "cancelled")
-    .reduce((sum, b) => sum + (b.totalAmount || 0), 0);
+  const activeCount = allBookings.filter(b => ["Confirmed", "Equipment Dispatched", "In Progress"].includes(b.status)).length;
+  const upcomingCount = allBookings.filter(b => b.status === "Pending").length;
+  const pastCount = allBookings.filter(b => ["Completed", "Cancelled"].includes(b.status)).length;
+  const totalSpent = allBookings.filter(b => b.status !== "Cancelled").reduce((sum, b) => sum + (b.totalAmount || 0), 0);
 
   return (
     <>
@@ -319,9 +216,9 @@ export default function BookingsScreen() {
           </View>
 
           {loading ? (
-            // Your existing skeleton UI (unchanged)
             <ScrollView contentContainerStyle={{ paddingHorizontal: 20, paddingTop: 16 }} showsVerticalScrollIndicator={false}>
-              {/* ... your skeleton code ... */}
+              {/* Your skeleton can go here if you want to keep it */}
+              <ActivityIndicator size="large" color="#0cadab" style={{ marginTop: 100 }} />
             </ScrollView>
           ) : (
             <>
@@ -347,7 +244,7 @@ export default function BookingsScreen() {
               {/* Tabs */}
               <View style={styles.tabRow}>
                 {TABS.map((tab) => {
-                  const count = tab === "Active" ? activeCount : tab === "Upcoming" ? upcomingCount : pastCount;
+                  const count = tab === "All" ? allBookings.length : tab === "Active" ? activeCount : tab === "Upcoming" ? upcomingCount : pastCount;
                   const isActive = activeTab === tab;
                   return (
                     <TouchableOpacity
@@ -376,7 +273,7 @@ export default function BookingsScreen() {
                 {items.length === 0 ? (
                   <EmptyState tab={activeTab} />
                 ) : (
-                  items.map((item) => <BookingCard key={item.id} item={item} onPress={setSelectedBooking} />)
+                  items.map((item) => <BookingCard key={item.id} item={item} onPress={(b) => router.push(`/bookings/${b.id}`)} />)
                 )}
 
                 {activeTab === "Past" && items.length > 0 && (
@@ -398,73 +295,38 @@ export default function BookingsScreen() {
           )}
         </LinearGradient>
       </SafeAreaView>
-
-      {selectedBooking && (
-        <BookingBottomSheet
-          booking={selectedBooking}
-          onClose={() => setSelectedBooking(null)}
-          onCancelBooking={handleCancelBooking}
-          onAddReview={handleAddReview}
-        />
-      )}
     </>
   );
-}
+};
 
+// ─── Empty State ─────────────────────────────────────────────────────────────
+const EmptyState = ({ tab }: { tab: string }) => (
+  <View style={styles.empty}>
+    <View style={styles.emptyIcon}>
+      <Ionicons name={{ All: "calendar-outline", Active: "radio-button-off-outline", Upcoming: "calendar-outline", Past: "time-outline" }[tab] as any} size={38} color="#0cadab" />
+    </View>
+    <Text style={styles.emptyTitle}>Nothing here yet</Text>
+    <Text style={styles.emptyMsg}>
+      {tab === "Active" ? "No active bookings.\nExplore DJs and make your first booking!" :
+       tab === "Upcoming" ? "No upcoming bookings.\nPlan your next event!" : 
+       "No past bookings yet.\nYour history will appear here."}
+    </Text>
+  </View>
+);
 
-// ─── Sheet Styles ─────────────────────────────────────────────────────────────
-
-const sheet = StyleSheet.create({
-  overlay: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(16,23,32,0.46)" },
-  panel: { position: "absolute", bottom: 0, left: 0, right: 0, height: FULL_HEIGHT, backgroundColor: "#fff", borderTopLeftRadius: 28, borderTopRightRadius: 28, borderWidth: 1, borderBottomWidth: 0, borderColor: "#eef0f3", overflow: "hidden" },
-  handleZone: { paddingTop: 12, paddingBottom: 6, alignItems: "center" },
-  handle: { width: 60, height: 4, borderRadius: 2, backgroundColor: "#d1d5db" },
-  scrollContent: { paddingBottom: 16 },
-  imageWrapper: { position: "relative", marginHorizontal: 16, marginBottom: 14, borderRadius: 20, overflow: "hidden" },
-  image: { width: "100%", height: 196, backgroundColor: "#e5e7eb" },
-  statusPill: { position: "absolute", top: 12, left: 12, flexDirection: "row", alignItems: "center", gap: 5, paddingHorizontal: 10, paddingVertical: 5, borderRadius: 20, borderWidth: 1 },
-  statusPillText: { fontSize: 12, fontWeight: "700" },
-  nameRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", paddingHorizontal: 20, marginBottom: 14 },
-  name: { fontSize: 20, fontWeight: "800", color: "#101720", letterSpacing: -0.4, marginBottom: 3 },
-  category: { fontSize: 13, color: "#8696a0", fontWeight: "500" },
-  totalPrice: { fontSize: 24, fontWeight: "800", color: "#101720", letterSpacing: -0.5 },
-  totalUnit: { fontSize: 11, color: "#8696a0", fontWeight: "500", textAlign: "right" },
-  card: { marginHorizontal: 16, marginBottom: 12, backgroundColor: "#f4f8ff", borderRadius: 18, padding: 16, borderWidth: 1, borderColor: "#eef0f3" },
-  cardTitle: { fontSize: 10, fontWeight: "700", color: "#8696a0", letterSpacing: 0.9, textTransform: "uppercase", marginBottom: 12 },
-  cardRow: { flexDirection: "row", alignItems: "center", gap: 10 },
-  cardIconBox: { width: 32, height: 32, borderRadius: 10, backgroundColor: "#fff", justifyContent: "center", alignItems: "center", borderWidth: 1, borderColor: "#eef0f3" },
-  cardLabel: { fontSize: 13, color: "#8696a0", fontWeight: "600", flex: 1 },
-  cardValue: { fontSize: 13, fontWeight: "700", color: "#101720", textAlign: "right" },
-  divider: { height: 1, backgroundColor: "#eef0f3", marginVertical: 10 },
-  dateBlock: { flexDirection: "row", alignItems: "center" },
-  dateLabel: { fontSize: 9, fontWeight: "700", color: "#8696a0", letterSpacing: 0.8, marginBottom: 4 },
-  dateValue: { fontSize: 14, fontWeight: "800", color: "#101720" },
-  dateLine: { flexDirection: "row", alignItems: "center", paddingHorizontal: 10, gap: 4 },
-  dateLineSeg: { width: 18, height: 1, backgroundColor: "#d0f0ef" },
-  notesCard: { marginHorizontal: 16, marginBottom: 12, flexDirection: "row", gap: 10, alignItems: "flex-start", backgroundColor: "#f0fafa", borderRadius: 14, padding: 14, borderWidth: 1, borderColor: "#d0f0ef" },
-  notesText: { flex: 1, fontSize: 13, color: "#4b6585", fontWeight: "500", lineHeight: 19 },
-  rateCard: { marginHorizontal: 16, marginBottom: 12, backgroundColor: "#fffbeb", borderRadius: 18, padding: 16, borderWidth: 1, borderColor: "#fde68a", gap: 10 },
-  rateTitle: { fontSize: 14, fontWeight: "800", color: "#101720" },
-  rateSub: { fontSize: 12, color: "#8696a0", fontWeight: "500" },
-  actions: { flexDirection: "row", gap: 10, paddingHorizontal: 16, marginTop: 4 },
-  actionPrimary: { flex: 1, backgroundColor: "#101720", borderRadius: 16, paddingVertical: 15, alignItems: "center", justifyContent: "center" },
-  actionPrimaryText: { fontSize: 15, fontWeight: "700", color: "#fff" },
-  actionDanger: { flex: 1, alignItems: "center", justifyContent: "center", backgroundColor: "#fef2f2", borderRadius: 16, paddingVertical: 15, borderWidth: 1, borderColor: "#fecaca" },
-  actionDangerText: { fontSize: 15, fontWeight: "700", color: "#ef4444" },
-});
-
-// ─── Screen Styles ────────────────────────────────────────────────────────────
-
+// ─── Screen Styles (Your Original Beautiful Styles) ──────────────────────────
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: "#f4f8ff" },
   topBar: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingHorizontal: 20, paddingTop: 14, paddingBottom: 10 },
   topBarTitle: { fontSize: 22, fontWeight: "800", color: "#101720", letterSpacing: -0.4 },
   topBarSub: { fontSize: 12, color: "#8696a0", fontWeight: "500", marginTop: 2 },
+
   strip: { flexDirection: "row", marginHorizontal: 20, marginBottom: 14, backgroundColor: "#fff", borderRadius: 18, padding: 14, borderWidth: 1, borderColor: "#eef0f3", alignItems: "center" },
   stripItem: { flex: 1, alignItems: "center", gap: 3 },
   stripDivider: { width: 1, height: 30, backgroundColor: "#eef0f3" },
   stripValue: { fontSize: 15, fontWeight: "800", color: "#101720" },
   stripLabel: { fontSize: 10, color: "#8696a0", fontWeight: "600" },
+
   tabRow: { flexDirection: "row", marginHorizontal: 20, marginBottom: 14, backgroundColor: "#fff", borderRadius: 16, padding: 4, borderWidth: 1, borderColor: "#eef0f3", gap: 4 },
   tab: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", paddingVertical: 10, borderRadius: 13, gap: 6 },
   tabOn: { backgroundColor: "#101720" },
@@ -474,7 +336,8 @@ const styles = StyleSheet.create({
   tabBadgeOn: { backgroundColor: "rgba(255,255,255,0.18)" },
   tabBadgeText: { fontSize: 11, fontWeight: "800", color: "#8696a0" },
   tabBadgeTextOn: { color: "#fff" },
-  list: { paddingHorizontal: 20 },
+
+  list: { paddingHorizontal: 20, paddingBottom: 100 },
   card: { backgroundColor: "#fff", borderRadius: 22, overflow: "hidden", marginBottom: 14, borderWidth: 1, borderColor: "#eef0f3" },
   cardImageWrapper: { position: "relative" },
   cardImage: { width: "100%", height: 176, backgroundColor: "#e5e7eb" },
@@ -490,10 +353,12 @@ const styles = StyleSheet.create({
   datePillLabel: { fontSize: 9, fontWeight: "700", color: "#8696a0", letterSpacing: 0.8, marginBottom: 3 },
   datePillValue: { fontSize: 12, fontWeight: "700", color: "#101720" },
   orderIdText: { fontSize: 11, fontWeight: "700", color: "#0cadab", marginLeft: "auto" },
+
   empty: { alignItems: "center", paddingTop: 56, paddingHorizontal: 32 },
   emptyIcon: { width: 86, height: 86, borderRadius: 28, backgroundColor: "#f0fafa", justifyContent: "center", alignItems: "center", marginBottom: 18, borderWidth: 1, borderColor: "#d0f0ef" },
   emptyTitle: { fontSize: 20, fontWeight: "800", color: "#101720", marginBottom: 8 },
   emptyMsg: { fontSize: 14, color: "#8696a0", textAlign: "center", lineHeight: 21, fontWeight: "500" },
+
   promoStrip: { borderRadius: 18, overflow: "hidden", marginTop: 4 },
   promoGrad: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 20, paddingVertical: 18 },
   promoTitle: { fontSize: 15, fontWeight: "800", color: "#fff", marginBottom: 3 },

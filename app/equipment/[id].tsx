@@ -520,6 +520,7 @@ export default function DJDetailScreen() {
         visible={sheetVisible}
         equipment={equipment}
         days={hours}
+        captainId={captainId}
         onClose={() => setSheetVisible(false)}
         onBooked={(receipt: RentalReceipt) => {
           console.log("Booked:", receipt);

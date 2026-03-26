@@ -2,15 +2,13 @@ import { Ionicons } from "@expo/vector-icons";
 import { Tabs } from "expo-router";
 import React, { useEffect, useRef } from "react";
 import { Animated, Dimensions, Platform, Pressable, StyleSheet, View } from "react-native";
-import { Text } from "react-native";
 
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
 
 const TABS = [
   { name: "index",     label: "Home",      icon: "home",              iconOutline: "home-outline" },
   { name: "bookings",  label: "Bookings",  icon: "calendar",          iconOutline: "calendar-outline" },
-  { name: "djs",       label: "DJs",       icon: "musical-notes",     iconOutline: "musical-notes-outline" },
-  { name: "equipment", label: "Gear",      icon: "hardware-chip",     iconOutline: "hardware-chip-outline" },
+  { name: "explore", label: "Explore",      icon: "hardware-chip",     iconOutline: "hardware-chip-outline" },
   { name: "profile",   label: "Profile",   icon: "person",            iconOutline: "person-outline" },
 ];
 
